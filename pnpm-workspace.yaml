@@ -1,2 +1,6 @@
+packages:
+  - .
+  - create-deprisk
+
 allowBuilds:
   esbuild: true

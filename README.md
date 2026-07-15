@@ -7,12 +7,17 @@ Dependabot/Renovate say "this package went from v4 → v5." DepRisk answers: "di
 ## Install
 
 ```bash
-npm install -D deprisk-check
-# or one-shot:
-npx --package=deprisk-check deprisk check <package> --from <old> --to <new>
+# scaffold GitHub Action in any project
+npx create-deprisk
+
+# run checks
+npx -p deprisk-check deprisk check <package> --from <old> --to <new>
+
+# or install the CLI
+pnpm add -D deprisk-check
 ```
 
-Requires Node.js 18+. Package name: **`deprisk-check`**. Binary: **`deprisk`**.
+Requires Node.js 18+. Package names: **`create-deprisk`** (scaffold) and **`deprisk-check`** (CLI). Binary: **`deprisk`**.
 
 ## Usage
 
@@ -83,19 +88,23 @@ npx deprisk check @vitejs/plugin-react --from 5.0.0 --to 6.0.3
 
 ## GitHub Action
 
-Create a workflow in any project:
+**Easiest — from any project:**
 
 ```bash
-# from your app repo (e.g. renovate-demo)
-npx --package=deprisk-check deprisk init
-# or after installing:
-deprisk init
+cd your-project
+npx create-deprisk
+```
+
+That creates `.github/workflows/deprisk.yml`. Commit and push it — DepRisk runs on dependency PRs.
+
+Or with the main CLI:
+
+```bash
+npx -p deprisk-check deprisk init
 deprisk init --force --fail-on medium
 ```
 
-This writes `.github/workflows/deprisk.yml`. Commit and push it — DepRisk will run on dependency PRs.
-
-See also [`action.yml`](./action.yml) and [`.github/workflows/deprisk-pr.yml`](./.github/workflows/deprisk-pr.yml).
+See also [`action.yml`](./action.yml) and [`create-deprisk/`](./create-deprisk/).
 
 ## How it works
 
