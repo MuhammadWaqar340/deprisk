@@ -27,6 +27,6 @@
     "directory": "create-deprisk"
   },
   "dependencies": {
-    "deprisk-check": "workspace:*"
+    "deprisk-check": "^0.5.1"
   }
 }
