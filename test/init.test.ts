@@ -14,10 +14,10 @@ afterEach(() => {
 
 describe("generateWorkflowYaml", () => {
   it("includes DepRisk job and fail-on setting", () => {
-    const yaml = generateWorkflowYaml({ failOn: "medium", packageVersion: "0.5.0" });
+    const yaml = generateWorkflowYaml({ failOn: "medium", packageVersion: "0.5.1" });
     expect(yaml).toContain("name: DepRisk");
     expect(yaml).toContain("pull_request:");
-    expect(yaml).toContain("deprisk-check@0.5.0");
+    expect(yaml).toContain("deprisk-check@0.5.1");
     expect(yaml).toContain("--fail-on medium");
     expect(yaml).toContain("diffNpmLockfiles");
   });

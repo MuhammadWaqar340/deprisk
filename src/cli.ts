@@ -14,7 +14,7 @@ import { formatMarkdownReport, formatHtmlReport } from "./reportFormat.js";
 import { initGitHubWorkflow } from "./init.js";
 import type { RiskLevel, RiskReport } from "./types.js";
 
-const VERSION = "0.5.0";
+const VERSION = "0.5.1";
 
 const program = new Command();
 

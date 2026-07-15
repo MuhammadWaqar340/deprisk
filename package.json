@@ -1,6 +1,6 @@
 {
   "name": "deprisk-check",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Check whether an npm dependency update actually risks your project's used APIs",
   "type": "module",
   "bin": {
