@@ -1,14 +1,23 @@
 {
   "name": "deprisk-check",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "description": "Check whether an npm dependency update actually risks your project's used APIs",
   "type": "module",
   "bin": {
     "deprisk": "./dist/cli.js"
   },
-  "main": "./dist/cli.js",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
-    "dist"
+    "dist",
+    "action.yml"
   ],
   "scripts": {
     "build": "tsc",
@@ -28,7 +37,8 @@
     "typescript",
     "api-diff",
     "dependabot",
-    "renovate"
+    "renovate",
+    "github-action"
   ],
   "license": "MIT",
   "packageManager": "pnpm@11.13.0",

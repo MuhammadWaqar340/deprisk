@@ -1,11 +1,21 @@
 export type ApiDiffStatus = "removed" | "changed" | "added" | "unchanged";
 
+export type ChangeKind =
+  | "removed"
+  | "deprecated"
+  | "param_removed"
+  | "param_added"
+  | "return_changed"
+  | "type_changed"
+  | "signature_changed";
+
 export interface ApiDiffEntry {
   name: string;
   status: ApiDiffStatus;
   oldSignature?: string;
   newSignature?: string;
   deprecated?: boolean;
+  changeKind?: ChangeKind;
 }
 
 export interface UsageLocation {
@@ -23,6 +33,7 @@ export interface FlaggedEntry {
   oldSignature?: string;
   newSignature?: string;
   deprecated?: boolean;
+  changeKind?: ChangeKind;
   usages: UsageLocation[];
   /** Human-readable summary of what changed */
   summary: string;
@@ -37,7 +48,14 @@ export interface RiskReport {
   unusedChangeCount: number;
   /** True when the package is not directly imported in the project */
   notImported?: boolean;
+  /** Where .d.ts came from for each side */
+  typesSource?: {
+    old: TypesSource;
+    new: TypesSource;
+  };
 }
+
+export type TypesSource = "bundled" | "definitelyTyped";
 
 export interface TypedPackagePaths {
   kind: "typed";
@@ -45,6 +63,10 @@ export interface TypedPackagePaths {
   newRoot: string;
   oldTypesEntry: string;
   newTypesEntry: string;
+  typesSource: {
+    old: TypesSource;
+    new: TypesSource;
+  };
 }
 
 export interface UntypedPackageResult {
@@ -54,3 +76,9 @@ export interface UntypedPackageResult {
 }
 
 export type FetchResult = TypedPackagePaths | UntypedPackageResult;
+
+export interface VersionBump {
+  packageName: string;
+  fromVersion: string;
+  toVersion: string;
+}

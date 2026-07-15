@@ -1,0 +1,49 @@
+name: DepRisk PR Check
+
+# Template workflow — copy into consuming repos or use after publishing this Action.
+on:
+  pull_request:
+    paths:
+      - "package.json"
+      - "package-lock.json"
+      - "pnpm-lock.yaml"
+      - "yarn.lock"
+
+jobs:
+  deprisk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install DepRisk
+        run: npm install -g deprisk-check@0.5.0
+
+      - name: Fetch base lockfile
+        run: |
+          git show origin/${{ github.base_ref }}:package-lock.json > /tmp/base-package-lock.json || true
+          cp package-lock.json /tmp/head-package-lock.json || true
+
+      - name: Run DepRisk (example — adjust package as needed)
+        run: |
+          if [ -f /tmp/base-package-lock.json ] && [ -f /tmp/head-package-lock.json ]; then
+            npx --yes --package=deprisk-check node -e "
+              const { diffNpmLockfiles, formatMarkdownReport } = require('deprisk-check');
+              const fs = require('fs');
+              const bumps = diffNpmLockfiles(
+                fs.readFileSync('/tmp/base-package-lock.json','utf8'),
+                fs.readFileSync('/tmp/head-package-lock.json','utf8')
+              );
+              console.log(JSON.stringify(bumps, null, 2));
+            "
+          fi
+          # Explicit example check (typed package):
+          deprisk check vite --from 8.0.0 --to 8.1.0 --path . --markdown --fail-on high || true

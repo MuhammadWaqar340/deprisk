@@ -7,33 +7,47 @@ Dependabot/Renovate say "this package went from v4 → v5." DepRisk answers: "di
 ## Install
 
 ```bash
-# one-shot
-npx deprisk check <package> --from <old> --to <new>
-
-# or install globally (package name is deprisk-check; `deprisk` was already taken on npm)
-pnpm add -g deprisk-check
+npm install -D deprisk-check
+# or one-shot:
+npx --package=deprisk-check deprisk check <package> --from <old> --to <new>
 ```
 
-Requires Node.js 18+. The binary name remains `deprisk`.
+Requires Node.js 18+. Package name: **`deprisk-check`**. Binary: **`deprisk`**.
 
 ## Usage
 
 ```bash
-deprisk check lodash --from 4.17.21 --to 5.0.0
-deprisk check chalk --from 4.1.2 --to 5.3.0 --path ./my-app
-deprisk check ms --from 2.1.2 --to 2.1.3 --verbose
+deprisk check lodash --from 4.17.20 --to 4.17.21
+deprisk check vite --from 8.0.0 --to 8.1.0 --path ./my-app
+deprisk check chalk --from 4.1.2 --to 5.3.0 --verbose
 deprisk check zod --from 3.22.0 --to 3.23.0 --json
+deprisk check vite --from 8.0.0 --to 8.1.0 --fail-on high
+deprisk check lodash --from 4.17.20 --to 4.17.21 --follow-reexports --workspaces
 ```
 
 ### Options
 
 | Flag | Description |
 |------|-------------|
-| `--from <version>` | Old package version (required) |
-| `--to <version>` | New package version (required) |
+| `--from <version>` | Old version (optional if lockfile autodetection can resolve it) |
+| `--to <version>` | New version |
 | `--path <dir>` | Project to scan (default: cwd) |
 | `--verbose` | Print full old/new signatures for flagged exports |
-| `--json` | Emit a machine-readable `RiskReport` (for CI / future GitHub Action) |
+| `--json` | Emit machine-readable `RiskReport` |
+| `--markdown` | Emit Markdown (PR comments) |
+| `--html <file>` | Write an HTML report |
+| `--fail-on high\|medium` | Exit non-zero when risk meets the threshold |
+| `--follow-reexports` | Trace consumer barrel files |
+| `--workspaces` | Also scan monorepo workspace packages |
+| `--semver-weight` | Weight major-version bumps more heavily |
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | LOW (or below `--fail-on` threshold) |
+| `1` | MEDIUM (default) or runtime error |
+| `2` | HIGH |
 
 ### Risk levels
 
@@ -41,20 +55,48 @@ deprisk check zod --from 3.22.0 --to 3.23.0 --json
 - **MEDIUM** — exactly one used export changed
 - **LOW** — nothing you use was touched (or the package isn't directly imported)
 
-## Example (from this repo)
+### DefinitelyTyped (`@types/*`)
+
+If a package ships no `.d.ts`, DepRisk falls back to `@types/<package>`:
+
+1. Exact `@types` version match when published  
+2. Else highest `@types` version with the same **major**  
+3. Else latest `@types` version  
+
+### `.depriskignore`
+
+```
+# ignore an export everywhere
+merge
+# ignore for one package
+lodash:get
+```
+
+## Renovate / Dependabot demo
 
 ```bash
-pnpm exec tsx src/cli.ts check clsx --from 1.2.1 --to 2.1.1 --path ./demo-project
-pnpm exec tsx src/cli.ts check zod --from 3.22.4 --to 3.23.8 --path ./demo-project
-pnpm exec tsx src/cli.ts check chalk --from 4.1.2 --to 5.3.0 --path ./demo-project
+cd renovate-demo
+npx deprisk check vite --from 8.0.0 --to 8.1.0
+npx deprisk check lodash --from 4.17.20 --to 4.17.21
+npx deprisk check @vitejs/plugin-react --from 5.0.0 --to 6.0.3
+```
+
+## GitHub Action
+
+See [`action.yml`](./action.yml) and [`.github/workflows/deprisk-pr.yml`](./.github/workflows/deprisk-pr.yml) for a PR comment template.
+
+```yaml
+- uses: actions/checkout@v4
+- run: npm install -g deprisk-check
+- run: deprisk check vite --from 8.0.0 --to 8.1.0 --markdown --fail-on high
 ```
 
 ## How it works
 
-1. **Fetcher** — downloads both versions from the npm registry (cached under `~/.deprisk/cache/`)
-2. **API Diff** — loads each version's `.d.ts` with ts-morph and diffs the public export surface
-3. **Usage Scanner** — finds direct imports/requires of that package in your project and records call sites
-4. **Risk Scorer** — intersects the diff with your usages and scores the result
+1. **Fetcher** — downloads both versions (cached under `~/.deprisk/cache/`), with `@types/*` fallback  
+2. **API Diff** — ts-morph `.d.ts` surface diff (default-export normalization)  
+3. **Usage Scanner** — imports/requires (+ optional barrel re-exports / workspaces)  
+4. **Risk Scorer** — intersects diff with usages (+ optional semver weighting)
 
 ## Development
 
@@ -63,19 +105,17 @@ pnpm install
 pnpm test
 pnpm run typecheck
 pnpm run build
-pnpm exec tsx src/cli.ts check ms --from 2.1.2 --to 2.1.3
 ```
 
-## Explicitly out of scope (v1)
+## Benchmark corpus
 
-These are intentional non-goals for this release — see "future work" if you'd like to contribute them later:
+See [benchmarks/CORPUS.md](./benchmarks/CORPUS.md).
 
-- JavaScript-only packages with no `.d.ts` files
-- Monorepo / workspace awareness
-- Tracing re-exports through the consumer's own barrel files
-- GitHub Action / PR-comment integration
-- Hosted dashboard or SaaS
-- Auto-fix or code-mod suggestions
+## Out of scope
+
+- Hosted dashboard / SaaS  
+- Auto-fix or code-mod suggestions  
+- Analyzing packages with **neither** bundled types nor `@types/*`
 
 ## License
 

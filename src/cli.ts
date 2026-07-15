@@ -1,38 +1,58 @@
 #!/usr/bin/env node
 
+import fs from "node:fs";
+import path from "node:path";
 import { Command } from "commander";
 import chalk from "chalk";
 import { fetchPackageVersions } from "./fetcher.js";
 import { diffApiSurfaces } from "./apiDiff.js";
-import { scanPackageUsage } from "./usageScanner.js";
+import { scanPackageUsage, discoverWorkspaceRoots } from "./usageScanner.js";
 import { scoreRisk } from "./riskScorer.js";
-import type { RiskReport } from "./types.js";
+import { resolveFromTo } from "./versionDetect.js";
+import { loadIgnoreSet, filterIgnoredNames } from "./ignore.js";
+import { formatMarkdownReport, formatHtmlReport } from "./reportFormat.js";
+import type { RiskLevel, RiskReport } from "./types.js";
+
+const VERSION = "0.5.0";
 
 const program = new Command();
 
 program
   .name("deprisk")
   .description("Check whether an npm dependency update risks the APIs your project actually uses")
-  .version("0.1.0");
+  .version(VERSION);
 
 program
   .command("check")
   .description("Compare two versions of a package against local usage")
   .argument("<package>", "npm package name")
-  .requiredOption("--from <version>", "old version")
-  .requiredOption("--to <version>", "new version")
+  .option("--from <version>", "old version (auto-detected from lockfile if omitted)")
+  .option("--to <version>", "new version (auto-detected from lockfile if omitted)")
   .option("--path <projectDir>", "project directory to scan", process.cwd())
   .option("--verbose", "print full old/new signatures for flagged entries", false)
   .option("--json", "print raw RiskReport as JSON", false)
+  .option("--markdown", "print Markdown report (for PR comments)", false)
+  .option("--html <file>", "write an HTML report to a file")
+  .option("--fail-on <level>", "exit non-zero when risk is at least this level: high|medium")
+  .option("--follow-reexports", "trace consumer barrel re-exports", false)
+  .option("--workspaces", "also scan workspace packages (monorepo)", false)
+  .option("--semver-weight", "weight major bumps more heavily in scoring", false)
   .action(async (packageName: string, opts: {
-    from: string;
-    to: string;
+    from?: string;
+    to?: string;
     path: string;
     verbose: boolean;
     json: boolean;
+    markdown: boolean;
+    html?: string;
+    failOn?: string;
+    followReexports: boolean;
+    workspaces: boolean;
+    semverWeight: boolean;
   }) => {
     try {
-      await runCheck(packageName, opts);
+      const report = await runCheck(packageName, opts);
+      applyExitCode(report.level, opts.failOn);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (opts.json) {
@@ -44,44 +64,114 @@ program
     }
   });
 
-async function runCheck(
+export async function runCheck(
   packageName: string,
-  opts: { from: string; to: string; path: string; verbose: boolean; json: boolean },
-): Promise<void> {
-  if (!opts.json) {
+  opts: {
+    from?: string;
+    to?: string;
+    path: string;
+    verbose?: boolean;
+    json?: boolean;
+    markdown?: boolean;
+    html?: string;
+    failOn?: string;
+    followReexports?: boolean;
+    workspaces?: boolean;
+    semverWeight?: boolean;
+  },
+): Promise<RiskReport> {
+  const { fromVersion, toVersion } = resolveFromTo(
+    opts.path,
+    packageName,
+    opts.from,
+    opts.to,
+  );
+
+  if (!opts.json && !opts.markdown) {
     console.log(
-      chalk.dim(`Scanning package API diff: ${packageName} ${opts.from} → ${opts.to}...`),
+      chalk.dim(`Scanning package API diff: ${packageName} ${fromVersion} → ${toVersion}...`),
     );
   }
 
-  const fetched = await fetchPackageVersions(packageName, opts.from, opts.to);
+  const fetched = await fetchPackageVersions(packageName, fromVersion, toVersion);
 
   if (fetched.kind === "untyped") {
     throw new Error(fetched.message);
   }
 
-  const diff = diffApiSurfaces(fetched.oldTypesEntry, fetched.newTypesEntry);
-
-  if (!opts.json) {
+  if (!opts.json && !opts.markdown) {
+    const src = fetched.typesSource;
+    if (src.old === "definitelyTyped" || src.new === "definitelyTyped") {
+      console.log(
+        chalk.dim(
+          `Types source: old=${src.old}, new=${src.new} (DefinitelyTyped fallback)`,
+        ),
+      );
+    }
     console.log(chalk.dim(`Scanning local usage of "${packageName}" in ${opts.path}...`));
     console.log();
   }
 
-  const usage = scanPackageUsage(opts.path, packageName);
+  const extraRoots = opts.workspaces ? discoverWorkspaceRoots(opts.path) : [];
+  const usage = scanPackageUsage(opts.path, packageName, {
+    followReexports: opts.followReexports,
+    extraRoots,
+  });
+
+  const ignore = loadIgnoreSet(opts.path, packageName);
+  for (const name of ignore) {
+    delete usage[name];
+  }
+
+  let diff = diffApiSurfaces(fetched.oldTypesEntry, fetched.newTypesEntry);
+  diff = filterIgnoredNames(diff, ignore);
+
   const report = scoreRisk({
     packageName,
-    fromVersion: opts.from,
-    toVersion: opts.to,
+    fromVersion,
+    toVersion,
     diff,
     usage,
+    typesSource: fetched.typesSource,
+    semverWeighting: opts.semverWeight,
   });
 
   if (opts.json) {
     console.log(JSON.stringify(report, null, 2));
+  } else if (opts.markdown) {
+    console.log(formatMarkdownReport(report));
+  } else {
+    printHumanReport(report, Boolean(opts.verbose), opts.path);
+  }
+
+  if (opts.html) {
+    const out = path.resolve(opts.html);
+    fs.writeFileSync(out, formatHtmlReport(report), "utf8");
+    if (!opts.json && !opts.markdown) {
+      console.log(chalk.dim(`HTML report written to ${out}`));
+    }
+  }
+
+  return report;
+}
+
+function applyExitCode(level: RiskLevel, failOn?: string): void {
+  // Default behavior: HIGH → 2, MEDIUM → 1, LOW → 0 (always, so CI can gate)
+  // --fail-on high: only HIGH fails (exit 2); MEDIUM/LOW → 0
+  // --fail-on medium: MEDIUM→1, HIGH→2
+  if (failOn === "high") {
+    if (level === "HIGH") process.exitCode = 2;
+    return;
+  }
+  if (failOn === "medium") {
+    if (level === "HIGH") process.exitCode = 2;
+    else if (level === "MEDIUM") process.exitCode = 1;
     return;
   }
 
-  printHumanReport(report, opts.verbose, opts.path);
+  // No --fail-on: still set informative exit codes
+  if (level === "HIGH") process.exitCode = 2;
+  else if (level === "MEDIUM") process.exitCode = 1;
 }
 
 function printHumanReport(report: RiskReport, verbose: boolean, projectPath: string): void {

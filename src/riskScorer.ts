@@ -1,4 +1,12 @@
-import type { ApiDiffEntry, FlaggedEntry, RiskLevel, RiskReport, UsageMap } from "./types.js";
+import type {
+  ApiDiffEntry,
+  ChangeKind,
+  FlaggedEntry,
+  RiskLevel,
+  RiskReport,
+  TypesSource,
+  UsageMap,
+} from "./types.js";
 
 export interface ScoreRiskInput {
   packageName: string;
@@ -6,6 +14,9 @@ export interface ScoreRiskInput {
   toVersion: string;
   diff: ApiDiffEntry[];
   usage: UsageMap;
+  typesSource?: { old: TypesSource; new: TypesSource };
+  /** When true, a major-version bump with any removal escalates toward HIGH */
+  semverWeighting?: boolean;
 }
 
 /**
@@ -14,9 +25,12 @@ export interface ScoreRiskInput {
  * HIGH   — any flagged entry is removed, OR 2+ flagged entries are changed
  * MEDIUM — exactly 1 flagged entry with status changed
  * LOW    — no flagged entries (or package not imported)
+ *
+ * With semverWeighting: major bump + any removed used export stays HIGH;
+ * major bump + a single param_added-only change stays MEDIUM (not escalated).
  */
 export function scoreRisk(input: ScoreRiskInput): RiskReport {
-  const { packageName, fromVersion, toVersion, diff, usage } = input;
+  const { packageName, fromVersion, toVersion, diff, usage, typesSource } = input;
   const usedNames = new Set(Object.keys(usage));
   const notImported = usedNames.size === 0;
 
@@ -34,24 +48,29 @@ export function scoreRisk(input: ScoreRiskInput): RiskReport {
       continue;
     }
 
+    const changeKind = entry.changeKind ?? inferChangeKind(entry);
     flagged.push({
       name: entry.name,
       status: entry.status,
       oldSignature: entry.oldSignature,
       newSignature: entry.newSignature,
       deprecated: entry.deprecated,
+      changeKind,
       usages,
-      summary: summarizeChange(entry),
+      summary: summarizeChange(entry, changeKind),
     });
   }
 
-  // Sort flagged by severity (removed first), then name
   flagged.sort((a, b) => {
     if (a.status !== b.status) return a.status === "removed" ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
 
-  const level = computeLevel(flagged);
+  let level = computeLevel(flagged);
+
+  if (input.semverWeighting) {
+    level = applySemverWeighting(level, flagged, fromVersion, toVersion);
+  }
 
   return {
     packageName,
@@ -61,6 +80,7 @@ export function scoreRisk(input: ScoreRiskInput): RiskReport {
     flagged,
     unusedChangeCount,
     ...(notImported ? { notImported: true } : {}),
+    ...(typesSource ? { typesSource } : {}),
   };
 }
 
@@ -75,45 +95,49 @@ function computeLevel(flagged: FlaggedEntry[]): RiskLevel {
   return "LOW";
 }
 
-function summarizeChange(entry: ApiDiffEntry): string {
-  if (entry.status === "removed") {
-    return "export removed";
+function applySemverWeighting(
+  level: RiskLevel,
+  flagged: FlaggedEntry[],
+  fromVersion: string,
+  toVersion: string,
+): RiskLevel {
+  if (!isMajorBump(fromVersion, toVersion)) return level;
+  if (flagged.some((f) => f.status === "removed" || f.changeKind === "param_removed")) {
+    return "HIGH";
   }
-
-  if (entry.deprecated && entry.oldSignature === entry.newSignature) {
-    return "marked @deprecated";
-  }
-
-  if (entry.deprecated) {
-    return "signature changed and marked @deprecated";
-  }
-
-  // Heuristic short summaries from signature diffs
-  const oldSig = entry.oldSignature ?? "";
-  const newSig = entry.newSignature ?? "";
-
-  if (oldSig.includes("defaultValue") && !newSig.includes("defaultValue")) {
-    return "parameter removed from signature";
-  }
-
-  if (countParams(newSig) > countParams(oldSig)) {
-    return "signature changed: parameters added";
-  }
-
-  if (countParams(newSig) < countParams(oldSig)) {
-    return "signature changed: parameter(s) removed";
-  }
-
-  if (oldSig.startsWith("type ") || oldSig.startsWith("interface ")) {
-    return "type definition changed";
-  }
-
-  return "signature changed";
+  if (level === "LOW" && flagged.length > 0) return "MEDIUM";
+  return level;
 }
 
-function countParams(sig: string): number {
-  const match = /\((.*)\)/.exec(sig);
-  if (!match || !match[1].trim()) return 0;
-  // Rough count — good enough for summary text
-  return match[1].split(",").length;
+export function isMajorBump(fromVersion: string, toVersion: string): boolean {
+  const fromMajor = Number.parseInt(fromVersion.split(".")[0] ?? "0", 10);
+  const toMajor = Number.parseInt(toVersion.split(".")[0] ?? "0", 10);
+  return Number.isFinite(fromMajor) && Number.isFinite(toMajor) && toMajor > fromMajor;
+}
+
+function inferChangeKind(entry: ApiDiffEntry): ChangeKind {
+  if (entry.status === "removed") return "removed";
+  if (entry.deprecated && entry.oldSignature === entry.newSignature) return "deprecated";
+  return "signature_changed";
+}
+
+function summarizeChange(entry: ApiDiffEntry, kind: ChangeKind): string {
+  switch (kind) {
+    case "removed":
+      return "export removed";
+    case "deprecated":
+      return "marked @deprecated";
+    case "param_removed":
+      return "signature changed: parameter(s) removed";
+    case "param_added":
+      return "signature changed: parameters added";
+    case "return_changed":
+      return "return type changed";
+    case "type_changed":
+      return "type definition changed";
+    case "signature_changed":
+    default:
+      if (entry.deprecated) return "signature changed and marked @deprecated";
+      return "signature changed";
+  }
 }

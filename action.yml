@@ -1,0 +1,37 @@
+name: "DepRisk Check"
+description: "Comment on dependency PRs with API-usage risk from DepRisk"
+author: "DepRisk"
+inputs:
+  package:
+    description: "Package name to check (if omitted, detect all bumps from lockfile diff)"
+    required: false
+  from:
+    description: "Old version (optional if lockfile base/head provided)"
+    required: false
+  to:
+    description: "New version"
+    required: false
+  path:
+    description: "Project path"
+    required: false
+    default: "."
+  fail-on:
+    description: "Fail the job when risk is at least this level (high|medium)"
+    required: false
+    default: "high"
+  github-token:
+    description: "Token for PR comments"
+    required: false
+    default: ""
+  base-lockfile:
+    description: "Path to base branch package-lock.json (for autodetection)"
+    required: false
+  head-lockfile:
+    description: "Path to head branch package-lock.json"
+    required: false
+runs:
+  using: "node20"
+  main: "dist/action.js"
+branding:
+  icon: "shield"
+  color: "red"

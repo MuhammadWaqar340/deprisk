@@ -6,11 +6,18 @@ import type { UsageLocation, UsageMap } from "./types.js";
 export interface ScanUsageOptions {
   /** Extra file globs when no tsconfig is found */
   include?: string[];
+  /**
+   * Follow local barrel re-exports (e.g. `export { merge } from 'lodash'`
+   * then `import { merge } from './utils'`).
+   */
+  followReexports?: boolean;
+  /** Additional roots for monorepo packages (absolute or relative to projectDir) */
+  extraRoots?: string[];
 }
 
 /**
- * Scan a project for direct usages of exports imported from `packageName`.
- * Does not follow consumer re-exports (v1 scope).
+ * Scan a project for usages of exports from `packageName`.
+ * With `followReexports: true`, also traces consumer barrel files.
  */
 export function scanPackageUsage(
   projectDir: string,
@@ -18,18 +25,77 @@ export function scanPackageUsage(
   options: ScanUsageOptions = {},
 ): UsageMap {
   const absDir = path.resolve(projectDir);
-  const project = loadProject(absDir, options.include);
+  const roots = [absDir, ...(options.extraRoots ?? []).map((r) => path.resolve(absDir, r))];
   const usageMap: UsageMap = {};
 
-  for (const sourceFile of project.getSourceFiles()) {
-    const filePath = sourceFile.getFilePath();
-    if (filePath.includes(`${path.sep}node_modules${path.sep}`)) continue;
-    if (filePath.endsWith(".d.ts")) continue;
+  for (const root of roots) {
+    if (!fs.existsSync(root)) continue;
+    const project = loadProject(root, options.include);
+    const reexportLocals = options.followReexports
+      ? buildReexportMap(project, packageName)
+      : new Map<string, Map<string, string>>();
 
-    collectFromSourceFile(sourceFile, packageName, absDir, usageMap);
+    for (const sourceFile of project.getSourceFiles()) {
+      const filePath = sourceFile.getFilePath();
+      if (filePath.includes(`${path.sep}node_modules${path.sep}`)) continue;
+      if (filePath.endsWith(".d.ts")) continue;
+
+      collectFromSourceFile(sourceFile, packageName, root, usageMap);
+
+      if (options.followReexports) {
+        collectReexportUsages(sourceFile, reexportLocals, root, usageMap);
+      }
+    }
   }
 
   return usageMap;
+}
+
+/**
+ * Discover workspace package directories (npm/pnpm/yarn workspaces, or packages/*).
+ */
+export function discoverWorkspaceRoots(projectDir: string): string[] {
+  const absDir = path.resolve(projectDir);
+  const roots: string[] = [];
+  const pkgPath = path.join(absDir, "package.json");
+  if (!fs.existsSync(pkgPath)) return roots;
+
+  try {
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as {
+      workspaces?: string[] | { packages?: string[] };
+    };
+    const patterns = Array.isArray(pkg.workspaces)
+      ? pkg.workspaces
+      : pkg.workspaces?.packages ?? [];
+
+    for (const pattern of patterns) {
+      // Only support simple globs like "packages/*" or "apps/*"
+      if (pattern.endsWith("/*")) {
+        const parent = path.join(absDir, pattern.slice(0, -2));
+        if (!fs.existsSync(parent)) continue;
+        for (const ent of fs.readdirSync(parent, { withFileTypes: true })) {
+          if (ent.isDirectory()) {
+            roots.push(path.join(parent, ent.name));
+          }
+        }
+      } else {
+        const candidate = path.join(absDir, pattern);
+        if (fs.existsSync(candidate)) roots.push(candidate);
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // Fallback common layout
+  const packagesDir = path.join(absDir, "packages");
+  if (roots.length === 0 && fs.existsSync(packagesDir)) {
+    for (const ent of fs.readdirSync(packagesDir, { withFileTypes: true })) {
+      if (ent.isDirectory()) roots.push(path.join(packagesDir, ent.name));
+    }
+  }
+
+  return roots;
 }
 
 function loadProject(absDir: string, include?: string[]): Project {
@@ -39,7 +105,7 @@ function loadProject(absDir: string, include?: string[]): Project {
     try {
       return new Project({ tsConfigFilePath: tsconfigPath });
     } catch {
-      // Fall through to manual file discovery if tsconfig is unusable
+      // Fall through
     }
   }
 
@@ -67,6 +133,103 @@ function loadProject(absDir: string, include?: string[]): Project {
   return project;
 }
 
+/**
+ * Map: barrelFilePath → (localExportName → originalPackageExportName)
+ */
+function buildReexportMap(
+  project: Project,
+  packageName: string,
+): Map<string, Map<string, string>> {
+  const map = new Map<string, Map<string, string>>();
+
+  for (const sourceFile of project.getSourceFiles()) {
+    const filePath = sourceFile.getFilePath();
+    if (filePath.includes(`${path.sep}node_modules${path.sep}`)) continue;
+
+    const locals = new Map<string, string>();
+
+    for (const exportDecl of sourceFile.getExportDeclarations()) {
+      const spec = exportDecl.getModuleSpecifierValue();
+      if (!spec || !isPackageImport(spec, packageName)) continue;
+
+      if (exportDecl.isNamespaceExport()) {
+        // export * as ns from 'pkg' — track ns.* later via namespace; skip named map
+        continue;
+      }
+
+      const named = exportDecl.getNamedExports();
+      if (named.length === 0 && !exportDecl.getNamespaceExport()) {
+        // export * from 'pkg' — cannot easily rematerialize per-import names into
+        // this barrel; skip for v1 of barrel tracing (named re-exports only).
+        continue;
+      }
+
+      for (const ne of named) {
+        const remote = ne.getName();
+        const local = ne.getAliasNode()?.getText() ?? remote;
+        locals.set(local, remote);
+      }
+    }
+
+    if (locals.size > 0) {
+      map.set(normalizePath(filePath), locals);
+    }
+  }
+
+  return map;
+}
+
+function collectReexportUsages(
+  sourceFile: SourceFile,
+  reexportLocals: Map<string, Map<string, string>>,
+  projectRoot: string,
+  usageMap: UsageMap,
+): void {
+  for (const importDecl of sourceFile.getImportDeclarations()) {
+    const spec = importDecl.getModuleSpecifierValue();
+    if (!spec.startsWith(".") && !spec.startsWith("/")) continue;
+
+    const resolved = resolveRelativeModule(sourceFile.getFilePath(), spec);
+    if (!resolved) continue;
+
+    const barrel = reexportLocals.get(normalizePath(resolved));
+    if (!barrel) continue;
+
+    for (const named of importDecl.getNamedImports()) {
+      const remoteFromBarrel = named.getName();
+      const local = named.getAliasNode()?.getText() ?? remoteFromBarrel;
+      const originalExport = barrel.get(remoteFromBarrel);
+      if (!originalExport) continue;
+
+      addUsages(sourceFile, local, originalExport, projectRoot, usageMap, importDecl, {
+        includePropertyAccessBase: true,
+      });
+    }
+  }
+}
+
+function resolveRelativeModule(fromFile: string, specifier: string): string | null {
+  const base = path.resolve(path.dirname(fromFile), specifier);
+  const candidates = [
+    base,
+    `${base}.ts`,
+    `${base}.tsx`,
+    `${base}.js`,
+    `${base}.jsx`,
+    path.join(base, "index.ts"),
+    path.join(base, "index.tsx"),
+    path.join(base, "index.js"),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c) && fs.statSync(c).isFile()) return c;
+  }
+  return null;
+}
+
+function normalizePath(p: string): string {
+  return path.normalize(p);
+}
+
 function collectFromSourceFile(
   sourceFile: SourceFile,
   packageName: string,
@@ -79,9 +242,7 @@ function collectFromSourceFile(
 
     const defaultImport = importDecl.getDefaultImport();
     if (defaultImport) {
-      // Property access on the default binding (lodash.trim) maps to export names.
       addNamespaceUsages(sourceFile, defaultImport.getText(), projectRoot, usageMap, importDecl);
-      // Direct calls/refs to the default binding itself.
       addUsages(sourceFile, defaultImport.getText(), "default", projectRoot, usageMap, importDecl);
     }
 
@@ -93,8 +254,6 @@ function collectFromSourceFile(
     for (const named of importDecl.getNamedImports()) {
       const remoteName = named.getName();
       const local = named.getAliasNode()?.getText() ?? remoteName;
-      // Count all refs to the local binding as usage of the remote export,
-      // including `z.object`-style property access on a named import.
       addUsages(sourceFile, local, remoteName, projectRoot, usageMap, importDecl, {
         includePropertyAccessBase: true,
       });
@@ -105,7 +264,6 @@ function collectFromSourceFile(
     for (const decl of varStmt.getDeclarations()) {
       const init = decl.getInitializer();
       if (!init) continue;
-
       if (!findRequireCall(init, packageName)) continue;
 
       const nameNode = decl.getNameNode();
@@ -153,8 +311,6 @@ function addUsages(
     const pos = id.getStart();
     if (pos >= importStart && pos <= importEnd) continue;
     if (isDeclarationName(id)) continue;
-    // Skip namespace-style property access unless caller wants those counted
-    // (named imports used as namespaces, e.g. `z.object`, should count).
     if (!options.includePropertyAccessBase) {
       const parent = id.getParent();
       if (
@@ -209,6 +365,7 @@ function isDeclarationName(id: Node): boolean {
   if (Node.isImportClause(parent)) return true;
   if (Node.isNamespaceImport(parent)) return true;
   if (Node.isBindingElement(parent) && parent.getNameNode() === id) return true;
+  if (Node.isExportSpecifier(parent)) return true;
   return false;
 }
 
