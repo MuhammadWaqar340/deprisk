@@ -11,6 +11,7 @@ import { scoreRisk } from "./riskScorer.js";
 import { resolveFromTo } from "./versionDetect.js";
 import { loadIgnoreSet, filterIgnoredNames } from "./ignore.js";
 import { formatMarkdownReport, formatHtmlReport } from "./reportFormat.js";
+import { initGitHubWorkflow } from "./init.js";
 import type { RiskLevel, RiskReport } from "./types.js";
 
 const VERSION = "0.5.0";
@@ -21,6 +22,42 @@ program
   .name("deprisk")
   .description("Check whether an npm dependency update risks the APIs your project actually uses")
   .version(VERSION);
+
+program
+  .command("init")
+  .description("Create a GitHub Actions workflow (.github/workflows/deprisk.yml)")
+  .option("--path <projectDir>", "project directory", process.cwd())
+  .option("--force", "overwrite an existing workflow file", false)
+  .option("--fail-on <level>", "fail the PR check when risk is at least: high|medium", "high")
+  .option("--output <file>", "workflow path relative to project", ".github/workflows/deprisk.yml")
+  .action((opts: {
+    path: string;
+    force: boolean;
+    failOn: string;
+    output: string;
+  }) => {
+    const failOn = opts.failOn === "medium" ? "medium" : "high";
+    const result = initGitHubWorkflow({
+      path: opts.path,
+      force: opts.force,
+      failOn,
+      output: opts.output,
+      packageVersion: VERSION,
+    });
+
+    if (result.skipped) {
+      console.log(chalk.yellow(result.message));
+      process.exitCode = 1;
+      return;
+    }
+
+    console.log(chalk.green(`✓ ${result.message}`));
+    console.log();
+    console.log(chalk.dim("Next steps:"));
+    console.log(chalk.dim("  1. Commit and push the workflow file"));
+    console.log(chalk.dim("  2. Open a dependency PR (Renovate/Dependabot) to see DepRisk run"));
+    console.log(chalk.dim(`  3. File: ${result.filePath}`));
+  });
 
 program
   .command("check")

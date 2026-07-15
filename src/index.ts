@@ -7,4 +7,5 @@ export { scoreRisk, isMajorBump } from "./riskScorer.js";
 export { detectVersionBumps, diffNpmLockfiles, resolveFromTo } from "./versionDetect.js";
 export { loadIgnoreSet, filterIgnoredNames } from "./ignore.js";
 export { formatMarkdownReport, formatHtmlReport } from "./reportFormat.js";
+export { initGitHubWorkflow, generateWorkflowYaml } from "./init.js";
 export type { RiskReport };

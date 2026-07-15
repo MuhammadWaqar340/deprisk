@@ -83,13 +83,19 @@ npx deprisk check @vitejs/plugin-react --from 5.0.0 --to 6.0.3
 
 ## GitHub Action
 
-See [`action.yml`](./action.yml) and [`.github/workflows/deprisk-pr.yml`](./.github/workflows/deprisk-pr.yml) for a PR comment template.
+Create a workflow in any project:
 
-```yaml
-- uses: actions/checkout@v4
-- run: npm install -g deprisk-check
-- run: deprisk check vite --from 8.0.0 --to 8.1.0 --markdown --fail-on high
+```bash
+# from your app repo (e.g. renovate-demo)
+npx --package=deprisk-check deprisk init
+# or after installing:
+deprisk init
+deprisk init --force --fail-on medium
 ```
+
+This writes `.github/workflows/deprisk.yml`. Commit and push it — DepRisk will run on dependency PRs.
+
+See also [`action.yml`](./action.yml) and [`.github/workflows/deprisk-pr.yml`](./.github/workflows/deprisk-pr.yml).
 
 ## How it works
 
