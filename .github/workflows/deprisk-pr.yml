@@ -1,6 +1,6 @@
 name: DepRisk PR Check
 
-# Template workflow — copy into consuming repos or use after publishing this Action.
+# Self-check on this repo: build CLI from the PR checkout (not npm — 0.7.0 may be unpublished).
 on:
   pull_request:
     paths:
@@ -8,6 +8,8 @@ on:
       - "package-lock.json"
       - "pnpm-lock.yaml"
       - "yarn.lock"
+      - "src/**"
+      - ".github/workflows/deprisk-pr.yml"
 
 jobs:
   deprisk:
@@ -20,30 +22,31 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: pnpm/action-setup@v4
+
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+          cache: pnpm
 
-      - name: Install DepRisk
-        run: npm install -g deprisk-check@0.5.1
-
-      - name: Fetch base lockfile
+      - name: Install and build
         run: |
-          git show origin/${{ github.base_ref }}:package-lock.json > /tmp/base-package-lock.json || true
-          cp package-lock.json /tmp/head-package-lock.json || true
+          pnpm install --frozen-lockfile
+          pnpm run build
 
-      - name: Run DepRisk (example — adjust package as needed)
+      - name: Run DepRisk scan vs base
         run: |
-          if [ -f /tmp/base-package-lock.json ] && [ -f /tmp/head-package-lock.json ]; then
-            npx --yes --package=deprisk-check node -e "
-              const { diffNpmLockfiles, formatMarkdownReport } = require('deprisk-check');
-              const fs = require('fs');
-              const bumps = diffNpmLockfiles(
-                fs.readFileSync('/tmp/base-package-lock.json','utf8'),
-                fs.readFileSync('/tmp/head-package-lock.json','utf8')
-              );
-              console.log(JSON.stringify(bumps, null, 2));
-            "
+          git fetch origin "${{ github.base_ref }}" --depth=1 || true
+          if git cat-file -e "origin/${{ github.base_ref }}:package-lock.json" 2>/dev/null; then
+            git show "origin/${{ github.base_ref }}:package-lock.json" > /tmp/base-package-lock.json
+            pnpm exec deprisk scan \
+              --base-lock /tmp/base-package-lock.json \
+              --head-lock ./package-lock.json \
+              --path . \
+              --markdown \
+              --fail-on high || true
+          else
+            echo "No package-lock.json on base branch — skipping lockfile bump scan."
+            echo "Smoke-check: vite 8.0.0 → 8.1.0"
+            pnpm exec deprisk check vite --from 8.0.0 --to 8.1.0 --path . --markdown --fail-on high || true
           fi
-          # Explicit example check (typed package):
-          deprisk check vite --from 8.0.0 --to 8.1.0 --path . --markdown --fail-on high || true

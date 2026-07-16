@@ -40,6 +40,18 @@ export function detectVersionBumps(
 }
 
 /**
+ * Read the currently locked version of a package from the project's lockfile.
+ */
+export function resolveLockedVersion(
+  projectDir: string,
+  packageName: string,
+): string | null {
+  const bumps = detectVersionBumps(projectDir, { packageName });
+  const match = bumps.find((b) => b.packageName === packageName);
+  return match?.toVersion ?? null;
+}
+
+/**
  * Resolve --from/--to for a package: use explicit overrides, else lockfile detection.
  */
 export function resolveFromTo(
@@ -50,9 +62,8 @@ export function resolveFromTo(
 ): { fromVersion: string; toVersion: string } {
   if (from && to) return { fromVersion: from, toVersion: to };
 
-  const bumps = detectVersionBumps(projectDir, { packageName });
-  const match = bumps.find((b) => b.packageName === packageName);
-  if (!match) {
+  const locked = resolveLockedVersion(projectDir, packageName);
+  if (!locked) {
     throw new Error(
       `Could not auto-detect versions for "${packageName}". `
         + `Pass --from and --to explicitly, or ensure a lockfile lists the package.`,
@@ -60,8 +71,8 @@ export function resolveFromTo(
   }
 
   return {
-    fromVersion: from ?? match.fromVersion,
-    toVersion: to ?? match.toVersion,
+    fromVersion: from ?? locked,
+    toVersion: to ?? locked,
   };
 }
 
@@ -126,7 +137,10 @@ export function diffNpmLockfiles(
   return bumps;
 }
 
-function readNpmLockVersions(lockJson: string): Map<string, string> {
+/**
+ * Parse top-level package versions from package-lock.json (v2/v3) text.
+ */
+export function readNpmLockVersions(lockJson: string): Map<string, string> {
   const map = new Map<string, string>();
   try {
     const lock = JSON.parse(lockJson) as {

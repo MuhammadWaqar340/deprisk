@@ -4,8 +4,28 @@ export { fetchPackageVersions, toDefinitelyTypedName, resolveTypesEntry } from "
 export { diffApiSurfaces, extractApiSurface, classifyChangeKind } from "./apiDiff.js";
 export { scanPackageUsage, discoverWorkspaceRoots } from "./usageScanner.js";
 export { scoreRisk, isMajorBump } from "./riskScorer.js";
-export { detectVersionBumps, diffNpmLockfiles, resolveFromTo } from "./versionDetect.js";
+export {
+  detectVersionBumps,
+  diffNpmLockfiles,
+  resolveFromTo,
+  resolveLockedVersion,
+  readNpmLockVersions,
+} from "./versionDetect.js";
 export { loadIgnoreSet, filterIgnoredNames } from "./ignore.js";
-export { formatMarkdownReport, formatHtmlReport } from "./reportFormat.js";
+export {
+  formatMarkdownReport,
+  formatHtmlReport,
+  formatScanSummary,
+  formatScanMarkdown,
+} from "./reportFormat.js";
 export { initGitHubWorkflow, generateWorkflowYaml } from "./init.js";
+export {
+  runScan,
+  analyzePackage,
+  resolveScanBumps,
+  listLockedPackagesForLatestAudit,
+  worstLevel,
+} from "./scan.js";
+export { resolveLatestVersion, isStableVersion, compareSemverDesc } from "./latest.js";
+export { resolveCheckVersions } from "./checkResolve.js";
 export type { RiskReport };
