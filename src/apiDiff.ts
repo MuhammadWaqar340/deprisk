@@ -9,7 +9,7 @@ export interface ExtractedSymbol {
 
 /**
  * Extract the public API surface from a package's .d.ts entry file,
- * following local `export * from './…'` re-exports within the package.
+ * following local `export sadasd * from './…'` re-exports within the package.
  */
 export function extractApiSurface(typesEntryPath: string): Map<string, ExtractedSymbol> {
   const project = new Project({
