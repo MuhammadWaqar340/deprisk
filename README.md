@@ -22,20 +22,68 @@ Requires Node.js 18+. Package names: **`create-deprisk`** (scaffold) and **`depr
 ## Usage
 
 ```bash
-deprisk check lodash --from 4.17.20 --to 4.17.21
-deprisk check vite --from 8.0.0 --to 8.1.0 --path ./my-app
-deprisk check chalk --from 4.1.2 --to 5.3.0 --verbose
-deprisk check zod --from 3.22.0 --to 3.23.0 --json
-deprisk check vite --from 8.0.0 --to 8.1.0 --fail-on high
-deprisk check lodash --from 4.17.20 --to 4.17.21 --follow-reexports --workspaces
+# Single package (manual versions)
+deprisk check lodash --from 4.17.20 --to 4.17.21 --path ./my-app
+
+# Single package: locked version vs npm latest (no --from/--to needed)
+deprisk check axios --latest --path ./my-app
+
+# Audit: every direct dependency in package-lock.json vs npm latest
+deprisk scan --latest --path ./my-app
+
+# Audit including every top-level lockfile package
+deprisk scan --latest --all
+
+# PR mode: all bumps vs main
+deprisk scan --base-ref origin/main
 ```
 
-### Options
+### Audit lockfile against latest (`deprisk scan --latest`)
+
+Reads versions from `package-lock.json`, looks up npm **latest** for each package, and runs DepRisk for **locked → latest**.
 
 | Flag | Description |
 |------|-------------|
-| `--from <version>` | Old version (optional if lockfile autodetection can resolve it) |
-| `--to <version>` | New version |
+| `--latest` | Enable lockfile → latest audit |
+| `--all` | All top-level lockfile packages (default: direct deps only) |
+| `--no-include-dev` | Skip `devDependencies` |
+| `--path <dir>` | Project root |
+| `--json` / `--markdown` | Machine / PR output |
+| `--fail-on high\|medium` | Gate on worst risk |
+
+Packages already on latest are reported as `UP_TO_DATE` (not re-analyzed).
+
+### Single package vs latest (`deprisk check <pkg> --latest`)
+
+Same idea for one dependency — no need to type versions:
+
+```bash
+deprisk check axios --latest
+# optional: override the locked “from” version
+deprisk check axios --from 0.27.2 --latest
+```
+
+| Flag | Description |
+|------|-------------|
+| `--latest` | Compare locked (or `--from`) version to npm latest |
+| `--from <version>` | Optional override instead of lockfile |
+| `--path <dir>` | Project with `package-lock.json` |
+
+### PR bump scan (`deprisk scan --base-ref` / `--base-lock`)
+
+| Flag | Description |
+|------|-------------|
+| `--base-lock <file>` | Base branch lockfile |
+| `--base-ref <git-ref>` | e.g. `origin/main` |
+| `--head-lock <file>` | Head lockfile (default: `./package-lock.json`) |
+
+### `deprisk check` options
+
+| Flag | Description |
+|------|-------------|
+| `--from <version>` | Old version (or override with `--latest`) |
+| `--to <version>` | New version (omit when using `--latest`) |
+| `--latest` | Compare locked/`--from` version to npm latest |
 | `--path <dir>` | Project to scan (default: cwd) |
 | `--verbose` | Print full old/new signatures for flagged exports |
 | `--json` | Emit machine-readable `RiskReport` |
@@ -131,6 +179,12 @@ See [benchmarks/CORPUS.md](./benchmarks/CORPUS.md).
 - Hosted dashboard / SaaS  
 - Auto-fix or code-mod suggestions  
 - Analyzing packages with **neither** bundled types nor `@types/*`
+
+## 0.7.0
+
+- `deprisk scan --latest` — audit `package-lock.json` versions against npm latest (API-usage risk)
+- `deprisk check <pkg> --latest` — one package: locked → npm latest (no `--from`/`--to`)
+- `deprisk scan --base-ref` / `--base-lock` — PR bump scan (restored alongside latest mode)
 
 ## License
 

@@ -25,7 +25,7 @@ jobs:
           node-version: 20
 
       - name: Install DepRisk
-        run: npm install -g deprisk-check@0.5.1
+        run: npm install -g deprisk-check@0.7.0
 
       - name: Fetch base lockfile
         run: |

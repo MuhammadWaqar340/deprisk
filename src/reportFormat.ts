@@ -1,4 +1,246 @@
-import type { RiskReport } from "./types.js";
+import type { RiskLevel, RiskReport } from "./types.js";
+import type { UpToDateEntry } from "./scan.js";
+
+export interface ScanFormatInput {
+  mode?: "bumps" | "latest";
+  reports: RiskReport[];
+  upToDate?: UpToDateEntry[];
+  errors: { packageName: string; message: string }[];
+  worstLevel: RiskLevel;
+  verbose?: boolean;
+}
+
+/**
+ * Human-readable summary table for `deprisk scan`.
+ */
+export function formatScanSummary(input: ScanFormatInput): string {
+  const { reports, errors, worstLevel, verbose, mode } = input;
+  const upToDate = input.upToDate ?? [];
+  const lines: string[] = [];
+
+  const analyzed = reports.length;
+  const totalListed = analyzed + upToDate.length + errors.length;
+  const isLatest = mode === "latest";
+
+  if (isLatest) {
+    lines.push(
+      `DepRisk scan — latest audit (${totalListed} package${totalListed === 1 ? "" : "s"}`
+        + (upToDate.length ? `, ${upToDate.length} already latest` : "")
+        + ")",
+    );
+  } else {
+    lines.push(`DepRisk scan — ${analyzed + errors.length} bump${analyzed + errors.length === 1 ? "" : "s"}`);
+  }
+  lines.push("");
+
+  if (totalListed === 0) {
+    lines.push(
+      isLatest
+        ? "No packages found to audit."
+        : "No dependency version bumps detected.",
+    );
+    return lines.join("\n");
+  }
+
+  if (isLatest) {
+    const pkgWidth = Math.max(
+      7,
+      ...reports.map((r) => r.packageName.length),
+      ...upToDate.map((u) => u.packageName.length),
+      ...errors.map((e) => e.packageName.length),
+    );
+    const lockedWidth = Math.max(
+      6,
+      ...reports.map((r) => r.fromVersion.length),
+      ...upToDate.map((u) => u.version.length),
+      6,
+    );
+    const latestWidth = Math.max(
+      6,
+      ...reports.map((r) => r.toVersion.length),
+      ...upToDate.map((u) => u.version.length),
+      6,
+    );
+
+    lines.push(
+      pad("PACKAGE", pkgWidth)
+        + "  "
+        + pad("LOCKED", lockedWidth)
+        + "  "
+        + pad("LATEST", latestWidth)
+        + "  RISK",
+    );
+
+    for (const r of reports) {
+      lines.push(
+        pad(r.packageName, pkgWidth)
+          + "  "
+          + pad(r.fromVersion, lockedWidth)
+          + "  "
+          + pad(r.toVersion, latestWidth)
+          + "  "
+          + r.level,
+      );
+    }
+    for (const u of upToDate) {
+      lines.push(
+        pad(u.packageName, pkgWidth)
+          + "  "
+          + pad(u.version, lockedWidth)
+          + "  "
+          + pad(u.version, latestWidth)
+          + "  UP_TO_DATE",
+      );
+    }
+    for (const e of errors) {
+      lines.push(
+        pad(e.packageName, pkgWidth)
+          + "  "
+          + pad("-", lockedWidth)
+          + "  "
+          + pad("-", latestWidth)
+          + "  ERROR",
+      );
+    }
+  } else {
+    const pkgWidth = Math.max(
+      7,
+      ...reports.map((r) => r.packageName.length),
+      ...errors.map((e) => e.packageName.length),
+    );
+    const fromWidth = Math.max(4, ...reports.map((r) => r.fromVersion.length), 8);
+    const toWidth = Math.max(2, ...reports.map((r) => r.toVersion.length), 8);
+
+    lines.push(
+      pad("PACKAGE", pkgWidth)
+        + "  "
+        + pad("FROM", fromWidth)
+        + "  "
+        + pad("TO", toWidth)
+        + "  RISK",
+    );
+
+    for (const r of reports) {
+      lines.push(
+        pad(r.packageName, pkgWidth)
+          + "  "
+          + pad(r.fromVersion, fromWidth)
+          + "  "
+          + pad(r.toVersion, toWidth)
+          + "  "
+          + r.level,
+      );
+    }
+    for (const e of errors) {
+      lines.push(
+        pad(e.packageName, pkgWidth)
+          + "  "
+          + pad("-", fromWidth)
+          + "  "
+          + pad("-", toWidth)
+          + "  ERROR",
+      );
+    }
+  }
+
+  const flagged = reports.filter((r) => r.flagged.length > 0);
+  if (flagged.length > 0 || verbose) {
+    lines.push("");
+    lines.push("Flagged:");
+    for (const r of flagged) {
+      for (const entry of r.flagged) {
+        const locs = entry.usages.map((u) => `${u.filePath}:${u.line}`).join(", ");
+        lines.push(`  ${r.packageName} — ${entry.name}(): ${entry.summary}`);
+        lines.push(`      used at: ${locs}`);
+      }
+    }
+    if (flagged.length === 0 && verbose) {
+      lines.push("  (none)");
+    }
+  }
+
+  if (errors.length > 0) {
+    lines.push("");
+    lines.push("Errors:");
+    for (const e of errors) {
+      lines.push(`  ${e.packageName}: ${e.message}`);
+    }
+  }
+
+  lines.push("");
+  lines.push(`RISK (worst): ${worstLevel}`);
+  return lines.join("\n");
+}
+
+/**
+ * Markdown summary for a multi-package scan (PR-friendly).
+ */
+export function formatScanMarkdown(input: ScanFormatInput): string {
+  const { reports, errors, worstLevel, mode } = input;
+  const upToDate = input.upToDate ?? [];
+  const isLatest = mode === "latest";
+  const emoji =
+    worstLevel === "HIGH" ? "🔴"
+      : worstLevel === "MEDIUM" ? "🟡"
+        : "🟢";
+
+  const lines: string[] = [
+    `## DepRisk scan ${emoji} \`${worstLevel}\`${isLatest ? " (latest audit)" : ""}`,
+    "",
+  ];
+
+  if (isLatest) {
+    lines.push(`| Package | Locked | Latest | Risk |`, `| --- | --- | --- | --- |`);
+    for (const r of reports) {
+      lines.push(
+        `| \`${r.packageName}\` | \`${r.fromVersion}\` | \`${r.toVersion}\` | **${r.level}** |`,
+      );
+    }
+    for (const u of upToDate) {
+      lines.push(
+        `| \`${u.packageName}\` | \`${u.version}\` | \`${u.version}\` | UP_TO_DATE |`,
+      );
+    }
+  } else {
+    lines.push(`| Package | From | To | Risk |`, `| --- | --- | --- | --- |`);
+    for (const r of reports) {
+      lines.push(
+        `| \`${r.packageName}\` | \`${r.fromVersion}\` | \`${r.toVersion}\` | **${r.level}** |`,
+      );
+    }
+  }
+
+  for (const e of errors) {
+    lines.push(`| \`${e.packageName}\` | - | - | ERROR |`);
+  }
+
+  const flagged = reports.filter((r) => r.flagged.length > 0);
+  if (flagged.length > 0) {
+    lines.push("", "### Flagged exports", "");
+    for (const r of flagged) {
+      lines.push(`#### ${r.packageName}`, "");
+      for (const entry of r.flagged) {
+        const locs = entry.usages.map((u) => `\`${u.filePath}:${u.line}\``).join(", ");
+        lines.push(`- **${entry.name}** — ${entry.summary}`);
+        lines.push(`  - used at: ${locs}`);
+      }
+      lines.push("");
+    }
+  }
+
+  if (errors.length > 0) {
+    lines.push("### Errors", "");
+    for (const e of errors) {
+      lines.push(`- **${e.packageName}**: ${e.message}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function pad(s: string, width: number): string {
+  return s.length >= width ? s : s + " ".repeat(width - s.length);
+}
 
 /**
  * Format a RiskReport as a Markdown PR comment.
