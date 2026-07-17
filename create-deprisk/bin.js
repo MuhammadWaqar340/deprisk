@@ -58,7 +58,7 @@ const result = initGitHubWorkflow({
   force: opts.force,
   failOn: opts.failOn,
   output: opts.output,
-  packageVersion: "0.7.0",
+  packageVersion: "0.7.1",
 });
 
 if (result.skipped) {

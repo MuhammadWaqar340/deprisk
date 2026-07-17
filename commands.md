@@ -23,7 +23,7 @@
 | `--markdown` | Markdown report (e.g. PR comments). |
 | `--html <file>` | Write an HTML report (`check` only). |
 | `--verbose` | Show full old/new signatures for flagged exports. |
-| `--fail-on high\|medium` | Exit non-zero when risk meets the threshold. |
+| `--fail-on high\|medium\|error` | Exit non-zero when risk meets the threshold; `error` also fails on any package that couldn't be analyzed. |
 | `--follow-reexports` | Trace consumer barrel re-exports. |
 | `--workspaces` | Also scan monorepo workspace packages. |
 | `--semver-weight` | Weight major-version bumps more heavily. |

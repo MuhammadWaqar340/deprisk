@@ -13,9 +13,10 @@ import {
 import { initGitHubWorkflow } from "./init.js";
 import { analyzePackage, runScan } from "./scan.js";
 import { resolveCheckVersions } from "./checkResolve.js";
-import type { RiskLevel, RiskReport } from "./types.js";
+import { computeExitCode, normalizeFailOn } from "./exitCode.js";
+import type { RiskReport } from "./types.js";
 
-const VERSION = "0.7.0";
+const VERSION = "0.7.1";
 
 const program = new Command();
 
@@ -29,7 +30,7 @@ program
   .description("Create a GitHub Actions workflow (.github/workflows/deprisk.yml)")
   .option("--path <projectDir>", "project directory", process.cwd())
   .option("--force", "overwrite an existing workflow file", false)
-  .option("--fail-on <level>", "fail the PR check when risk is at least: high|medium", "high")
+  .option("--fail-on <level>", "fail the PR check when risk is at least: high|medium|error", "high")
   .option("--output <file>", "workflow path relative to project", ".github/workflows/deprisk.yml")
   .action((opts: {
     path: string;
@@ -37,7 +38,7 @@ program
     failOn: string;
     output: string;
   }) => {
-    const failOn = opts.failOn === "medium" ? "medium" : "high";
+    const failOn = normalizeFailOn(opts.failOn) ?? "high";
     const result = initGitHubWorkflow({
       path: opts.path,
       force: opts.force,
@@ -71,7 +72,7 @@ program
   .option("--base-lock <file>", "PR mode: base package-lock.json")
   .option("--base-ref <git-ref>", "PR mode: git ref for base lockfile (e.g. origin/main)")
   .option("--head-lock <file>", "PR mode: head package-lock.json (default: <path>/package-lock.json)")
-  .option("--fail-on <level>", "exit non-zero when worst risk is at least: high|medium")
+  .option("--fail-on <level>", "exit non-zero when worst risk is at least: high|medium (or 'error' to also fail on analysis errors)")
   .option("--json", "print scan result as JSON", false)
   .option("--markdown", "print Markdown scan summary", false)
   .option("--verbose", "show extra flagged details", false)
@@ -110,6 +111,8 @@ program
       if (opts.all && !opts.latest) {
         throw new Error("--all is only valid with --latest.");
       }
+
+      const failOn = normalizeFailOn(opts.failOn);
 
       const result = await runScan({
         path: opts.path,
@@ -162,14 +165,16 @@ program
         }));
       }
 
-      if (result.errors.length > 0 && result.reports.length === 0 && !opts.failOn) {
-        process.exitCode = 1;
+      const hasErrors = result.errors.length > 0;
+      let exit = computeExitCode(result.worstLevel, failOn, hasErrors);
+
+      // No explicit gate but the scan produced only errors (nothing analyzable):
+      // signal a soft failure so the problem isn't silently ignored.
+      if (!failOn && hasErrors && result.reports.length === 0 && exit === 0) {
+        exit = 1;
       }
 
-      applyExitCode(result.worstLevel, opts.failOn);
-      if (opts.failOn && result.errors.length > 0 && !process.exitCode) {
-        process.exitCode = 1;
-      }
+      if (exit) process.exitCode = exit;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (opts.json) {
@@ -197,7 +202,7 @@ program
   .option("--json", "print raw RiskReport as JSON", false)
   .option("--markdown", "print Markdown report (for PR comments)", false)
   .option("--html <file>", "write an HTML report to a file")
-  .option("--fail-on <level>", "exit non-zero when risk is at least this level: high|medium")
+  .option("--fail-on <level>", "exit non-zero when risk is at least this level: high|medium (or 'error')")
   .option("--follow-reexports", "trace consumer barrel re-exports", false)
   .option("--workspaces", "also scan workspace packages (monorepo)", false)
   .option("--semver-weight", "weight major bumps more heavily in scoring", false)
@@ -216,8 +221,10 @@ program
     semverWeight: boolean;
   }) => {
     try {
+      const failOn = normalizeFailOn(opts.failOn);
       const report = await runCheck(packageName, opts);
-      applyExitCode(report.level, opts.failOn);
+      const exit = computeExitCode(report.level, failOn);
+      if (exit) process.exitCode = exit;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (opts.json) {
@@ -327,21 +334,6 @@ export async function runCheck(
   }
 
   return report;
-}
-
-function applyExitCode(level: RiskLevel, failOn?: string): void {
-  if (failOn === "high") {
-    if (level === "HIGH") process.exitCode = 2;
-    return;
-  }
-  if (failOn === "medium") {
-    if (level === "HIGH") process.exitCode = 2;
-    else if (level === "MEDIUM") process.exitCode = 1;
-    return;
-  }
-
-  if (level === "HIGH") process.exitCode = 2;
-  else if (level === "MEDIUM") process.exitCode = 1;
 }
 
 function printHumanReport(report: RiskReport, verbose: boolean, projectPath: string): void {

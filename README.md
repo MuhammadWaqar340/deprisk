@@ -89,7 +89,7 @@ deprisk check axios --from 0.27.2 --latest
 | `--json` | Emit machine-readable `RiskReport` |
 | `--markdown` | Emit Markdown (PR comments) |
 | `--html <file>` | Write an HTML report |
-| `--fail-on high\|medium` | Exit non-zero when risk meets the threshold |
+| `--fail-on high\|medium\|error` | Exit non-zero when risk meets the threshold (`error` also fails on analysis errors) |
 | `--follow-reexports` | Trace consumer barrel files |
 | `--workspaces` | Also scan monorepo workspace packages |
 | `--semver-weight` | Weight major-version bumps more heavily |
@@ -101,6 +101,22 @@ deprisk check axios --from 0.27.2 --latest
 | `0` | LOW (or below `--fail-on` threshold) |
 | `1` | MEDIUM (default) or runtime error |
 | `2` | HIGH |
+
+### `--fail-on`
+
+Both `check` and `scan` accept `--fail-on`:
+
+| Value | Fails the build on |
+|-------|--------------------|
+| `high` | HIGH only (analysis errors ignored) |
+| `medium` | HIGH or MEDIUM (analysis errors ignored) |
+| `error` | HIGH, MEDIUM, **or any analysis error** (untyped/fetch failures) |
+
+Without `--fail-on`, exit is by risk (HIGH=2, MEDIUM=1, LOW=0); a scan that produces *only* errors and nothing analyzable still exits `1`. Use `--fail-on error` to gate CI on packages DepRisk couldn't analyze:
+
+```bash
+deprisk scan --latest --fail-on error
+```
 
 ### Risk levels
 
@@ -179,6 +195,11 @@ See [benchmarks/CORPUS.md](./benchmarks/CORPUS.md).
 - Hosted dashboard / SaaS  
 - Auto-fix or code-mod suggestions  
 - Analyzing packages with **neither** bundled types nor `@types/*`
+
+## 0.7.1
+
+- `--fail-on error` — gate `check`/`scan` on any package DepRisk couldn't analyze (untyped/fetch errors), in addition to HIGH/MEDIUM. `high`/`medium` now ignore analysis errors.
+- `--fail-on` values are validated (`high|medium|error`).
 
 ## 0.7.0
 
