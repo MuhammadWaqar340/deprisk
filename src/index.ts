@@ -28,4 +28,6 @@ export {
 } from "./scan.js";
 export { resolveLatestVersion, isStableVersion, compareSemverDesc } from "./latest.js";
 export { resolveCheckVersions } from "./checkResolve.js";
+export { computeExitCode, normalizeFailOn, FAIL_ON_VALUES } from "./exitCode.js";
+export type { FailOn } from "./exitCode.js";
 export type { RiskReport };
