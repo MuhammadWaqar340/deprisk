@@ -42,9 +42,14 @@ export async function fetchPackageVersions(
     return {
       kind: "untyped",
       packageName,
+      reason: "no-types",
       message:
-        `Package "${packageName}" has no TypeScript types available for version(s): ${missing.join(", ")}. `
-        + `Checked bundled .d.ts and DefinitelyTyped package "${typesPkg}".`,
+        `No TypeScript declarations found for "${packageName}" `
+        + `(version(s): ${missing.join(", ")}).\n`
+        + `DepRisk searched:\n`
+        + `  - Bundled package .d.ts\n`
+        + `  - DefinitelyTyped package "${typesPkg}"\n`
+        + `Recommendation: API compatibility analysis is unavailable for this package.`,
     };
   }
 

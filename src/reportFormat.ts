@@ -1,13 +1,41 @@
 import type { RiskLevel, RiskReport } from "./types.js";
-import type { UpToDateEntry } from "./scan.js";
+import type { SkippedEntry, UpToDateEntry } from "./scan.js";
 
 export interface ScanFormatInput {
   mode?: "bumps" | "latest";
   reports: RiskReport[];
   upToDate?: UpToDateEntry[];
+  skipped?: SkippedEntry[];
   errors: { packageName: string; message: string }[];
   worstLevel: RiskLevel;
   verbose?: boolean;
+  /** Show every UP_TO_DATE row (default: summarize count only) */
+  showUpToDate?: boolean;
+  /** Show every SKIPPED row in the main table (default: count + short list when verbose/includeSkipped) */
+  includeSkipped?: boolean;
+}
+
+export interface ScanCounts {
+  analyzed: number;
+  high: number;
+  medium: number;
+  low: number;
+  skipped: number;
+  error: number;
+  upToDate: number;
+}
+
+export function countScanStatuses(input: ScanFormatInput): ScanCounts {
+  const reports = input.reports;
+  return {
+    analyzed: reports.length,
+    high: reports.filter((r) => r.level === "HIGH").length,
+    medium: reports.filter((r) => r.level === "MEDIUM").length,
+    low: reports.filter((r) => r.level === "LOW").length,
+    skipped: (input.skipped ?? []).length,
+    error: input.errors.length,
+    upToDate: (input.upToDate ?? []).length,
+  };
 }
 
 /**
@@ -16,24 +44,39 @@ export interface ScanFormatInput {
 export function formatScanSummary(input: ScanFormatInput): string {
   const { reports, errors, worstLevel, verbose, mode } = input;
   const upToDate = input.upToDate ?? [];
+  const skipped = input.skipped ?? [];
+  const showUpToDate = Boolean(input.showUpToDate || verbose);
+  const includeSkipped = Boolean(input.includeSkipped || verbose);
+  const counts = countScanStatuses(input);
   const lines: string[] = [];
-
-  const analyzed = reports.length;
-  const totalListed = analyzed + upToDate.length + errors.length;
   const isLatest = mode === "latest";
+
+  const total =
+    counts.analyzed + counts.upToDate + counts.skipped + counts.error;
 
   if (isLatest) {
     lines.push(
-      `DepRisk scan — latest audit (${totalListed} package${totalListed === 1 ? "" : "s"}`
-        + (upToDate.length ? `, ${upToDate.length} already latest` : "")
-        + ")",
+      `DepRisk scan — latest audit (${total} package${total === 1 ? "" : "s"})`,
     );
   } else {
-    lines.push(`DepRisk scan — ${analyzed + errors.length} bump${analyzed + errors.length === 1 ? "" : "s"}`);
+    lines.push(
+      `DepRisk scan — ${counts.analyzed + counts.skipped + counts.error} bump${
+        counts.analyzed + counts.skipped + counts.error === 1 ? "" : "s"
+      }`,
+    );
   }
   lines.push("");
+  lines.push("Summary");
+  lines.push(`  Analyzed:   ${counts.analyzed}`);
+  lines.push(`  HIGH:       ${counts.high}`);
+  lines.push(`  MEDIUM:     ${counts.medium}`);
+  lines.push(`  LOW:        ${counts.low}`);
+  lines.push(`  SKIPPED:    ${counts.skipped}`);
+  lines.push(`  ERROR:      ${counts.error}`);
+  lines.push(`  UP_TO_DATE: ${counts.upToDate}`);
+  lines.push("");
 
-  if (totalListed === 0) {
+  if (total === 0) {
     lines.push(
       isLatest
         ? "No packages found to audit."
@@ -42,105 +85,79 @@ export function formatScanSummary(input: ScanFormatInput): string {
     return lines.join("\n");
   }
 
-  if (isLatest) {
-    const pkgWidth = Math.max(
-      7,
-      ...reports.map((r) => r.packageName.length),
-      ...upToDate.map((u) => u.packageName.length),
-      ...errors.map((e) => e.packageName.length),
-    );
-    const lockedWidth = Math.max(
-      6,
-      ...reports.map((r) => r.fromVersion.length),
-      ...upToDate.map((u) => u.version.length),
-      6,
-    );
-    const latestWidth = Math.max(
-      6,
-      ...reports.map((r) => r.toVersion.length),
-      ...upToDate.map((u) => u.version.length),
-      6,
-    );
+  const tableRows: {
+    name: string;
+    from: string;
+    to: string;
+    risk: string;
+  }[] = [];
 
-    lines.push(
-      pad("PACKAGE", pkgWidth)
-        + "  "
-        + pad("LOCKED", lockedWidth)
-        + "  "
-        + pad("LATEST", latestWidth)
-        + "  RISK",
-    );
-
-    for (const r of reports) {
-      lines.push(
-        pad(r.packageName, pkgWidth)
-          + "  "
-          + pad(r.fromVersion, lockedWidth)
-          + "  "
-          + pad(r.toVersion, latestWidth)
-          + "  "
-          + r.level,
-      );
-    }
+  for (const r of reports) {
+    tableRows.push({
+      name: r.packageName,
+      from: r.fromVersion,
+      to: r.toVersion,
+      risk: r.level,
+    });
+  }
+  if (showUpToDate) {
     for (const u of upToDate) {
-      lines.push(
-        pad(u.packageName, pkgWidth)
-          + "  "
-          + pad(u.version, lockedWidth)
-          + "  "
-          + pad(u.version, latestWidth)
-          + "  UP_TO_DATE",
-      );
+      tableRows.push({
+        name: u.packageName,
+        from: u.version,
+        to: u.version,
+        risk: "UP_TO_DATE",
+      });
     }
-    for (const e of errors) {
-      lines.push(
-        pad(e.packageName, pkgWidth)
-          + "  "
-          + pad("-", lockedWidth)
-          + "  "
-          + pad("-", latestWidth)
-          + "  ERROR",
-      );
+  }
+  if (includeSkipped) {
+    for (const s of skipped) {
+      tableRows.push({
+        name: s.packageName,
+        from: s.fromVersion ?? "-",
+        to: s.toVersion ?? "-",
+        risk: "SKIPPED",
+      });
     }
-  } else {
-    const pkgWidth = Math.max(
-      7,
-      ...reports.map((r) => r.packageName.length),
-      ...errors.map((e) => e.packageName.length),
-    );
-    const fromWidth = Math.max(4, ...reports.map((r) => r.fromVersion.length), 8);
-    const toWidth = Math.max(2, ...reports.map((r) => r.toVersion.length), 8);
+  }
+  for (const e of errors) {
+    tableRows.push({ name: e.packageName, from: "-", to: "-", risk: "ERROR" });
+  }
+
+  if (tableRows.length > 0) {
+    const fromLabel = isLatest ? "LOCKED" : "FROM";
+    const toLabel = isLatest ? "LATEST" : "TO";
+    const pkgWidth = Math.max(7, ...tableRows.map((r) => r.name.length));
+    const fromWidth = Math.max(fromLabel.length, ...tableRows.map((r) => r.from.length));
+    const toWidth = Math.max(toLabel.length, ...tableRows.map((r) => r.to.length));
 
     lines.push(
       pad("PACKAGE", pkgWidth)
         + "  "
-        + pad("FROM", fromWidth)
+        + pad(fromLabel, fromWidth)
         + "  "
-        + pad("TO", toWidth)
+        + pad(toLabel, toWidth)
         + "  RISK",
     );
+    for (const r of tableRows) {
+      lines.push(
+        pad(r.name, pkgWidth)
+          + "  "
+          + pad(r.from, fromWidth)
+          + "  "
+          + pad(r.to, toWidth)
+          + "  "
+          + r.risk,
+      );
+    }
+  }
 
-    for (const r of reports) {
-      lines.push(
-        pad(r.packageName, pkgWidth)
-          + "  "
-          + pad(r.fromVersion, fromWidth)
-          + "  "
-          + pad(r.toVersion, toWidth)
-          + "  "
-          + r.level,
-      );
-    }
-    for (const e of errors) {
-      lines.push(
-        pad(e.packageName, pkgWidth)
-          + "  "
-          + pad("-", fromWidth)
-          + "  "
-          + pad("-", toWidth)
-          + "  ERROR",
-      );
-    }
+  if (!showUpToDate && upToDate.length > 0) {
+    lines.push("");
+    lines.push(
+      `${upToDate.length} package${upToDate.length === 1 ? "" : "s"} already on latest `
+        + `(pass --show-up-to-date to list).`,
+    );
   }
 
   const flagged = reports.filter((r) => r.flagged.length > 0);
@@ -156,6 +173,18 @@ export function formatScanSummary(input: ScanFormatInput): string {
     }
     if (flagged.length === 0 && verbose) {
       lines.push("  (none)");
+    }
+  }
+
+  if (skipped.length > 0) {
+    lines.push("");
+    lines.push("Skipped (no TypeScript types — not a failure):");
+    const list = includeSkipped ? skipped : skipped.slice(0, 5);
+    for (const s of list) {
+      lines.push(`  ${s.packageName}: no bundled .d.ts or compatible @types/*`);
+    }
+    if (!includeSkipped && skipped.length > 5) {
+      lines.push(`  … and ${skipped.length - 5} more (pass --include-skipped to list all)`);
     }
   }
 
@@ -178,54 +207,88 @@ export function formatScanSummary(input: ScanFormatInput): string {
 export function formatScanMarkdown(input: ScanFormatInput): string {
   const { reports, errors, worstLevel, mode } = input;
   const upToDate = input.upToDate ?? [];
+  const skipped = input.skipped ?? [];
+  const showUpToDate = Boolean(input.showUpToDate || input.verbose);
+  const includeSkipped = Boolean(input.includeSkipped || input.verbose);
+  const counts = countScanStatuses(input);
   const isLatest = mode === "latest";
-  const emoji =
-    worstLevel === "HIGH" ? "🔴"
-      : worstLevel === "MEDIUM" ? "🟡"
-        : "🟢";
 
   const lines: string[] = [
-    `## DepRisk scan ${emoji} \`${worstLevel}\`${isLatest ? " (latest audit)" : ""}`,
+    `## DepRisk Upgrade Analysis`,
+    "",
+    `**Worst risk:** \`${worstLevel}\`${isLatest ? " _(latest audit)_" : ""}`,
+    "",
+    "### Summary",
+    "",
+    `| Metric | Count |`,
+    `| --- | ---: |`,
+    `| Analyzed | ${counts.analyzed} |`,
+    `| HIGH | ${counts.high} |`,
+    `| MEDIUM | ${counts.medium} |`,
+    `| LOW | ${counts.low} |`,
+    `| SKIPPED | ${counts.skipped} |`,
+    `| ERROR | ${counts.error} |`,
+    `| UP_TO_DATE | ${counts.upToDate} |`,
     "",
   ];
 
-  if (isLatest) {
-    lines.push(`| Package | Locked | Latest | Risk |`, `| --- | --- | --- | --- |`);
-    for (const r of reports) {
-      lines.push(
-        `| \`${r.packageName}\` | \`${r.fromVersion}\` | \`${r.toVersion}\` | **${r.level}** |`,
-      );
-    }
-    for (const u of upToDate) {
-      lines.push(
-        `| \`${u.packageName}\` | \`${u.version}\` | \`${u.version}\` | UP_TO_DATE |`,
-      );
-    }
-  } else {
-    lines.push(`| Package | From | To | Risk |`, `| --- | --- | --- | --- |`);
-    for (const r of reports) {
-      lines.push(
-        `| \`${r.packageName}\` | \`${r.fromVersion}\` | \`${r.toVersion}\` | **${r.level}** |`,
-      );
-    }
-  }
+  const ordered = [...reports].sort((a, b) => riskRank(b.level) - riskRank(a.level));
 
-  for (const e of errors) {
-    lines.push(`| \`${e.packageName}\` | - | - | ERROR |`);
-  }
-
-  const flagged = reports.filter((r) => r.flagged.length > 0);
-  if (flagged.length > 0) {
-    lines.push("", "### Flagged exports", "");
-    for (const r of flagged) {
-      lines.push(`#### ${r.packageName}`, "");
-      for (const entry of r.flagged) {
-        const locs = entry.usages.map((u) => `\`${u.filePath}:${u.line}\``).join(", ");
-        lines.push(`- **${entry.name}** — ${entry.summary}`);
-        lines.push(`  - used at: ${locs}`);
+  if (ordered.length > 0 || errors.length > 0) {
+    lines.push("### Packages", "");
+    if (isLatest) {
+      lines.push(`| Package | Locked | Latest | Risk |`, `| --- | --- | --- | --- |`);
+      for (const r of ordered) {
+        lines.push(
+          `| \`${r.packageName}\` | \`${r.fromVersion}\` | \`${r.toVersion}\` | **${r.level}** |`,
+        );
       }
-      lines.push("");
+      if (showUpToDate) {
+        for (const u of upToDate) {
+          lines.push(
+            `| \`${u.packageName}\` | \`${u.version}\` | \`${u.version}\` | UP_TO_DATE |`,
+          );
+        }
+      }
+    } else {
+      lines.push(`| Package | From | To | Risk |`, `| --- | --- | --- | --- |`);
+      for (const r of ordered) {
+        lines.push(
+          `| \`${r.packageName}\` | \`${r.fromVersion}\` | \`${r.toVersion}\` | **${r.level}** |`,
+        );
+      }
     }
+    for (const e of errors) {
+      lines.push(`| \`${e.packageName}\` | - | - | ERROR |`);
+    }
+    if (includeSkipped) {
+      for (const s of skipped) {
+        lines.push(
+          `| \`${s.packageName}\` | \`${s.fromVersion ?? "-"}\` | \`${s.toVersion ?? "-"}\` | SKIPPED |`,
+        );
+      }
+    }
+    lines.push("");
+  }
+
+  const high = reports.filter((r) => r.level === "HIGH" && r.flagged.length > 0);
+  const medium = reports.filter((r) => r.level === "MEDIUM" && r.flagged.length > 0);
+
+  if (high.length > 0) {
+    lines.push("### High risk", "");
+    for (const r of high) appendFlaggedMarkdown(lines, r);
+  }
+  if (medium.length > 0) {
+    lines.push("### Medium risk", "");
+    for (const r of medium) appendFlaggedMarkdown(lines, r);
+  }
+
+  if (skipped.length > 0 && !includeSkipped) {
+    lines.push(
+      `_${skipped.length} package(s) skipped (no TypeScript types). `
+        + `Not counted as upgrade risk._`,
+      "",
+    );
   }
 
   if (errors.length > 0) {
@@ -233,9 +296,31 @@ export function formatScanMarkdown(input: ScanFormatInput): string {
     for (const e of errors) {
       lines.push(`- **${e.packageName}**: ${e.message}`);
     }
+    lines.push("");
   }
 
+  lines.push(
+    worstLevel === "LOW"
+      ? "_Recommendation: no used-API breakage detected in analyzed packages._"
+      : "_Recommendation: review flagged exports before merging._",
+  );
+
   return lines.join("\n");
+}
+
+function riskRank(level: RiskLevel): number {
+  return level === "HIGH" ? 3 : level === "MEDIUM" ? 2 : 1;
+}
+
+function appendFlaggedMarkdown(lines: string[], r: RiskReport): void {
+  lines.push(`#### \`${r.packageName}\` (\`${r.fromVersion}\` → \`${r.toVersion}\`)`, "");
+  lines.push("Used API changes:", "");
+  for (const entry of r.flagged) {
+    const locs = entry.usages.map((u) => `\`${u.filePath}:${u.line}\``).join(", ");
+    lines.push(`- \`${entry.name}()\`: ${entry.summary}`);
+    lines.push(`  - Affected usage: ${locs}`);
+  }
+  lines.push("");
 }
 
 function pad(s: string, width: number): string {
@@ -246,15 +331,12 @@ function pad(s: string, width: number): string {
  * Format a RiskReport as a Markdown PR comment.
  */
 export function formatMarkdownReport(report: RiskReport): string {
-  const emoji =
-    report.level === "HIGH" ? "🔴"
-      : report.level === "MEDIUM" ? "🟡"
-        : "🟢";
-
   const lines: string[] = [
-    `## DepRisk ${emoji} \`${report.level}\``,
+    `## DepRisk Upgrade Analysis`,
     "",
     `**${report.packageName}** \`${report.fromVersion}\` → \`${report.toVersion}\``,
+    "",
+    `**Risk:** \`${report.level}\``,
     "",
   ];
 
@@ -272,20 +354,23 @@ export function formatMarkdownReport(report: RiskReport): string {
 
   if (report.flagged.length === 0) {
     lines.push("No used exports were changed, deprecated, or removed.");
-  } else {
-    lines.push(`### Flagged exports (${report.flagged.length})`);
     lines.push("");
+    lines.push("_Recommendation: safe to review and merge from an API-usage perspective._");
+  } else {
+    lines.push(`### Used API changes (${report.flagged.length})`, "");
     for (const entry of report.flagged) {
       const locs = entry.usages.map((u) => `\`${u.filePath}:${u.line}\``).join(", ");
       lines.push(`- **${entry.name}** — ${entry.summary}`);
       lines.push(`  - used at: ${locs}`);
     }
+    lines.push("");
+    lines.push("_Recommendation: review before merging._");
   }
 
   if (report.unusedChangeCount > 0) {
     lines.push("");
     lines.push(
-      `_Unused changes (safe to ignore): ${report.unusedChangeCount} other export(s)._`,
+      `_Unused API changes (not imported): ${report.unusedChangeCount}._`,
     );
   }
 

@@ -201,41 +201,48 @@ describe("resolveScanBumps (PR mode still works)", () => {
 });
 
 describe("formatScanSummary latest mode", () => {
-  it("prints LOCKED / LATEST / UP_TO_DATE columns", () => {
-    const text = formatScanSummary({
-      mode: "latest",
+  it("summarizes UP_TO_DATE by default and lists on --show-up-to-date", () => {
+    const base = {
+      mode: "latest" as const,
       reports: [
         {
           packageName: "lodash",
           fromVersion: "4.17.21",
           toVersion: "4.18.1",
-          level: "LOW",
+          level: "LOW" as const,
           flagged: [],
           unusedChangeCount: 0,
         },
       ],
       upToDate: [{ packageName: "oxlint", version: "1.74.0" }],
+      skipped: [],
       errors: [],
-      worstLevel: "LOW",
-    });
+      worstLevel: "LOW" as const,
+    };
+    const text = formatScanSummary(base);
     expect(text).toContain("latest audit");
-    expect(text).toContain("LOCKED");
-    expect(text).toContain("LATEST");
-    expect(text).toContain("UP_TO_DATE");
-    expect(text).toContain("already latest");
+    expect(text).toContain("Summary");
+    expect(text).toContain("UP_TO_DATE: 1");
+    expect(text).toContain("already on latest");
+    expect(text).not.toMatch(/oxlint\s+1\.74\.0\s+1\.74\.0\s+UP_TO_DATE/);
+
+    const verbose = formatScanSummary({ ...base, showUpToDate: true });
+    expect(verbose).toContain("UP_TO_DATE");
+    expect(verbose).toContain("oxlint");
   });
 
-  it("formats markdown for latest audit", () => {
+  it("formats markdown with summary counts", () => {
     const md = formatScanMarkdown({
       mode: "latest",
       reports: [],
       upToDate: [{ packageName: "vite", version: "8.0.0" }],
+      skipped: [],
       errors: [],
       worstLevel: "LOW",
     });
-    expect(md).toContain("latest audit");
-    expect(md).toContain("Locked");
+    expect(md).toContain("DepRisk Upgrade Analysis");
     expect(md).toContain("UP_TO_DATE");
+    expect(md).toContain("| Analyzed |");
   });
 });
 
@@ -249,7 +256,7 @@ describe("worstLevel", () => {
 
 describe("generateWorkflowYaml", () => {
   it("uses deprisk scan", () => {
-    const yaml = generateWorkflowYaml({ packageVersion: "0.7.0" });
+    const yaml = generateWorkflowYaml({ packageVersion: "0.8.0" });
     expect(yaml).toContain("deprisk scan");
     expect(yaml).toContain("--base-lock");
   });
