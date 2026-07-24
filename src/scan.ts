@@ -5,20 +5,34 @@ import { fetchPackageVersions } from "./fetcher.js";
 import { diffApiSurfaces } from "./apiDiff.js";
 import { scanPackageUsage, discoverWorkspaceRoots } from "./usageScanner.js";
 import { scoreRisk } from "./riskScorer.js";
-import { diffNpmLockfiles, readNpmLockVersions } from "./versionDetect.js";
+import {
+  diffLockfileVersions,
+  parseNpmLockVersionsOrThrow,
+  parsePnpmLockVersionsOrThrow,
+} from "./versionDetect.js";
 import { loadIgnoreSet, filterIgnoredNames } from "./ignore.js";
 import { resolveLatestVersion } from "./latest.js";
-import type { RiskLevel, RiskReport, VersionBump } from "./types.js";
+import { UntypedPackageError, isUntypedPackageError } from "./analysisErrors.js";
+import {
+  detectLockfiles,
+  requireLockfileForLatest,
+  requireLockfileForPrMode,
+  type LockfileKind,
+} from "./lockfileDetect.js";
+import type { FetchResult, RiskLevel, RiskReport, VersionBump } from "./types.js";
+
+export type FetchVersionsFn = (
+  packageName: string,
+  fromVersion: string,
+  toVersion: string,
+) => Promise<FetchResult>;
 
 export interface ScanOptions {
   path: string;
-  /** PR bump mode */
   baseLock?: string;
   baseRef?: string;
   headLock?: string;
-  /** Latest audit mode */
   latest?: boolean;
-  /** Include every top-level lockfile package (latest mode) */
   all?: boolean;
   includeDev?: boolean;
   followReexports?: boolean;
@@ -26,7 +40,10 @@ export interface ScanOptions {
   semverWeight?: boolean;
   concurrency?: number;
   resolveLatest?: (packageName: string) => Promise<string>;
+  /** Injectable for tests — defaults to fetchPackageVersions */
+  fetchVersions?: FetchVersionsFn;
   onBump?: (bump: VersionBump, index: number, total: number) => void;
+  onLockfileWarning?: (warning: string) => void;
 }
 
 export interface UpToDateEntry {
@@ -34,13 +51,23 @@ export interface UpToDateEntry {
   version: string;
 }
 
+export interface SkippedEntry {
+  packageName: string;
+  fromVersion?: string;
+  toVersion?: string;
+  reason: "no-types";
+  message: string;
+}
+
 export interface ScanResult {
   mode: "bumps" | "latest";
   bumps: VersionBump[];
   reports: RiskReport[];
   upToDate: UpToDateEntry[];
+  skipped: SkippedEntry[];
   errors: { packageName: string; message: string }[];
   worstLevel: RiskLevel;
+  lockfileKind?: LockfileKind;
 }
 
 /**
@@ -55,11 +82,13 @@ export async function analyzePackage(
     followReexports?: boolean;
     workspaces?: boolean;
     semverWeight?: boolean;
+    fetchVersions?: FetchVersionsFn;
   },
 ): Promise<RiskReport> {
-  const fetched = await fetchPackageVersions(packageName, fromVersion, toVersion);
+  const fetchFn = opts.fetchVersions ?? fetchPackageVersions;
+  const fetched = await fetchFn(packageName, fromVersion, toVersion);
   if (fetched.kind === "untyped") {
-    throw new Error(fetched.message);
+    throw new UntypedPackageError(packageName, fetched.message);
   }
 
   const extraRoots = opts.workspaces ? discoverWorkspaceRoots(opts.path) : [];
@@ -89,6 +118,7 @@ export async function analyzePackage(
 
 /**
  * Resolve version bumps from --base-lock or --base-ref against the project lockfile.
+ * Uses centralized lockfile detection (npm or pnpm). Yarn PR mode is unsupported.
  */
 export function resolveScanBumps(options: {
   path: string;
@@ -96,35 +126,72 @@ export function resolveScanBumps(options: {
   baseRef?: string;
   headLock?: string;
   includeDev?: boolean;
+  onLockfileWarning?: (warning: string) => void;
 }): VersionBump[] {
   const projectDir = path.resolve(options.path);
-  const headPath = options.headLock
-    ? path.resolve(options.headLock)
-    : path.join(projectDir, "package-lock.json");
 
-  if (!fs.existsSync(headPath)) {
-    throw new Error(
-      `Head lockfile not found: ${headPath}. DepRisk scan requires package-lock.json.`,
-    );
+  let kind: LockfileKind;
+  let headPath: string;
+  let lockfileName: string;
+
+  if (options.headLock) {
+    headPath = path.resolve(options.headLock);
+    if (!fs.existsSync(headPath)) {
+      throw new Error(
+        `Head lockfile not found: ${headPath}.\n`
+          + `Pass a valid --head-lock path, or omit it to auto-detect in the project.`,
+      );
+    }
+    kind = inferKindFromPath(headPath);
+    lockfileName = path.basename(headPath);
+    if (kind === "yarn") {
+      throw yarnPrUnsupportedError(headPath);
+    }
+  } else {
+    const detected = requireLockfileForPrMode(projectDir);
+    if (detected.warning) options.onLockfileWarning?.(detected.warning);
+    kind = detected.primary!.kind;
+    headPath = detected.primary!.absolutePath;
+    lockfileName = detected.primary!.fileName;
   }
 
-  let baseJson: string;
+  let baseText: string;
   if (options.baseLock) {
     const basePath = path.resolve(options.baseLock);
     if (!fs.existsSync(basePath)) {
-      throw new Error(`Base lockfile not found: ${basePath}`);
+      throw new Error(
+        `Base lockfile not found: ${basePath}\n`
+          + `Check the path or pass --base-ref origin/main instead.`,
+      );
     }
-    baseJson = fs.readFileSync(basePath, "utf8");
+    // CI often checks out the base lock as a temp name (e.g. base.json).
+    // When the basename is not a known lockfile, inherit the head lockfile kind.
+    const baseKind = tryInferKindFromPath(basePath);
+    if (baseKind != null && baseKind !== kind) {
+      throw new Error(
+        `Base lockfile type (${baseKind}) does not match head (${kind}).\n`
+          + `Use matching lockfile formats for PR bump comparison.`,
+      );
+    }
+    baseText = fs.readFileSync(basePath, "utf8");
   } else if (options.baseRef) {
-    baseJson = readLockfileFromGitRef(projectDir, options.baseRef, "package-lock.json");
+    baseText = readLockfileFromGitRef(projectDir, options.baseRef, lockfileName);
   } else {
     throw new Error(
       "Pass --base-lock <file>, --base-ref <git-ref>, or --latest.",
     );
   }
 
-  const headJson = fs.readFileSync(headPath, "utf8");
-  let bumps = diffNpmLockfiles(baseJson, headJson);
+  const headText = fs.readFileSync(headPath, "utf8");
+  let bumps: VersionBump[];
+  try {
+    bumps = diffLockfileVersions(kind, baseText, headText);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Failed to compare ${lockfileName} for PR bumps.\n${msg}`,
+    );
+  }
 
   if (options.includeDev === false) {
     bumps = filterProdDepsOnly(projectDir, bumps);
@@ -134,44 +201,92 @@ export function resolveScanBumps(options: {
   return bumps;
 }
 
+function tryInferKindFromPath(filePath: string): LockfileKind | null {
+  const base = path.basename(filePath);
+  if (base === "pnpm-lock.yaml" || base.endsWith("pnpm-lock.yaml")) return "pnpm";
+  if (base === "yarn.lock" || base.endsWith("yarn.lock")) return "yarn";
+  if (base === "package-lock.json" || base.endsWith("package-lock.json")) return "npm";
+  return null;
+}
+
+function inferKindFromPath(filePath: string): LockfileKind {
+  const kind = tryInferKindFromPath(filePath);
+  if (kind) return kind;
+  throw new Error(
+    `Unrecognized lockfile name "${path.basename(filePath)}".\n`
+      + `Expected package-lock.json, pnpm-lock.yaml, or yarn.lock.`,
+  );
+}
+
+function yarnPrUnsupportedError(filePath: string): Error {
+  return new Error(
+    `Found ${path.basename(filePath)} but DepRisk PR bump mode does not support Yarn yet.\n`
+      + `Use package-lock.json or pnpm-lock.yaml for --base-lock/--base-ref scans,\n`
+      + `or analyze a single package with: deprisk check <pkg> --from <A> --to <B>.`,
+  );
+}
+
 /**
- * Build locked→latest bumps for audit mode.
- * Returns candidates; caller separates up-to-date after resolving latest.
+ * Build locked→latest package list for audit mode (npm or pnpm lockfile).
  */
 export function listLockedPackagesForLatestAudit(
   projectDir: string,
-  options: { all?: boolean; includeDev?: boolean } = {},
-): { packageName: string; lockedVersion: string }[] {
+  options: {
+    all?: boolean;
+    includeDev?: boolean;
+    onLockfileWarning?: (warning: string) => void;
+  } = {},
+): { packageName: string; lockedVersion: string; lockfileKind: LockfileKind }[] {
   const abs = path.resolve(projectDir);
-  const lockPath = path.join(abs, "package-lock.json");
-  if (!fs.existsSync(lockPath)) {
-    throw new Error(
-      `package-lock.json not found in ${abs}. --latest currently requires an npm lockfile.`,
-    );
+  const detected = requireLockfileForLatest(abs);
+  if (detected.warning) options.onLockfileWarning?.(detected.warning);
+
+  const primary = detected.primary!;
+  const lockText = fs.readFileSync(primary.absolutePath, "utf8");
+  let locked: Map<string, string>;
+  try {
+    locked =
+      primary.kind === "pnpm"
+        ? parsePnpmLockVersionsOrThrow(lockText, primary.fileName)
+        : parseNpmLockVersionsOrThrow(lockText, primary.fileName);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(msg);
   }
 
-  const locked = readNpmLockVersions(fs.readFileSync(lockPath, "utf8"));
   let names: string[];
-
   if (options.all) {
     names = [...locked.keys()];
   } else {
     names = readDirectDependencyNames(abs, options.includeDev !== false);
   }
 
-  const result: { packageName: string; lockedVersion: string }[] = [];
+  const result: {
+    packageName: string;
+    lockedVersion: string;
+    lockfileKind: LockfileKind;
+  }[] = [];
   for (const name of names.sort()) {
     const version = locked.get(name);
     if (!version) continue;
-    result.push({ packageName: name, lockedVersion: version });
+    result.push({
+      packageName: name,
+      lockedVersion: version,
+      lockfileKind: primary.kind,
+    });
   }
   return result;
 }
 
 function readDirectDependencyNames(projectDir: string, includeDev: boolean): string[] {
-  const pkg = JSON.parse(
-    fs.readFileSync(path.join(projectDir, "package.json"), "utf8"),
-  ) as {
+  const pkgPath = path.join(projectDir, "package.json");
+  if (!fs.existsSync(pkgPath)) {
+    throw new Error(
+      `package.json not found in ${projectDir}.\n`
+        + `Pass --path <projectDir> pointing at your app root.`,
+    );
+  }
+  const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as {
     dependencies?: Record<string, string>;
     devDependencies?: Record<string, string>;
   };
@@ -195,8 +310,9 @@ function readLockfileFromGitRef(
     });
   } catch {
     throw new Error(
-      `Could not read ${lockfileName} from git ref "${ref}". `
-        + `Fetch the ref first (e.g. git fetch origin main).`,
+      `Could not read ${lockfileName} from git ref "${ref}".\n`
+        + `Fetch the ref first (e.g. git fetch origin ${ref.replace(/^origin\//, "")}), `
+        + `or pass --base-lock <file> with a local copy.`,
     );
   }
 }
@@ -233,21 +349,29 @@ export async function runScan(options: ScanOptions): Promise<ScanResult> {
     baseRef: options.baseRef,
     headLock: options.headLock,
     includeDev: options.includeDev,
+    onLockfileWarning: options.onLockfileWarning,
   });
 
-  return analyzeBumps(bumps, options, "bumps");
+  const analyzed = await analyzeBumps(bumps, options, "bumps");
+  const detected = detectLockfiles(options.path);
+  return {
+    ...analyzed,
+    lockfileKind: detected.primary?.kind,
+  };
 }
 
 async function runLatestAudit(options: ScanOptions): Promise<ScanResult> {
   const lockedList = listLockedPackagesForLatestAudit(options.path, {
     all: options.all,
     includeDev: options.includeDev,
+    onLockfileWarning: options.onLockfileWarning,
   });
 
   const resolveLatest = options.resolveLatest ?? resolveLatestVersion;
   const bumps: VersionBump[] = [];
   const upToDate: UpToDateEntry[] = [];
   const errors: ScanResult["errors"] = [];
+  const lockfileKind = lockedList[0]?.lockfileKind;
 
   for (const item of lockedList) {
     try {
@@ -274,6 +398,7 @@ async function runLatestAudit(options: ScanOptions): Promise<ScanResult> {
     ...analyzed,
     upToDate,
     errors: [...errors, ...analyzed.errors],
+    lockfileKind,
   };
 }
 
@@ -284,6 +409,7 @@ async function analyzeBumps(
 ): Promise<ScanResult> {
   const reports: RiskReport[] = [];
   const errors: ScanResult["errors"] = [];
+  const skipped: SkippedEntry[] = [];
   const concurrency = Math.max(1, options.concurrency ?? 4);
 
   let nextIndex = 0;
@@ -303,14 +429,25 @@ async function analyzeBumps(
             followReexports: options.followReexports,
             workspaces: options.workspaces,
             semverWeight: options.semverWeight,
+            fetchVersions: options.fetchVersions,
           },
         );
         reports.push(report);
       } catch (err) {
-        errors.push({
-          packageName: bump.packageName,
-          message: err instanceof Error ? err.message : String(err),
-        });
+        if (isUntypedPackageError(err)) {
+          skipped.push({
+            packageName: bump.packageName,
+            fromVersion: bump.fromVersion,
+            toVersion: bump.toVersion,
+            reason: "no-types",
+            message: err.message,
+          });
+        } else {
+          errors.push({
+            packageName: bump.packageName,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     }
   }
@@ -322,12 +459,14 @@ async function analyzeBumps(
 
   reports.sort((a, b) => a.packageName.localeCompare(b.packageName));
   errors.sort((a, b) => a.packageName.localeCompare(b.packageName));
+  skipped.sort((a, b) => a.packageName.localeCompare(b.packageName));
 
   return {
     mode,
     bumps,
     reports,
     upToDate: [],
+    skipped,
     errors,
     worstLevel: worstLevel(reports),
   };

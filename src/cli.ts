@@ -10,13 +10,16 @@ import {
   formatScanSummary,
   formatScanMarkdown,
 } from "./reportFormat.js";
+import { formatScanSarif, writeSarifFile } from "./sarifFormat.js";
 import { initGitHubWorkflow } from "./init.js";
 import { analyzePackage, runScan } from "./scan.js";
 import { resolveCheckVersions } from "./checkResolve.js";
 import { computeExitCode, normalizeFailOn } from "./exitCode.js";
+import { loadDepRiskConfig } from "./config.js";
+import { isUntypedPackageError } from "./analysisErrors.js";
 import type { RiskReport } from "./types.js";
 
-const VERSION = "0.7.1";
+const VERSION = "0.8.0";
 
 const program = new Command();
 
@@ -64,7 +67,7 @@ program
 program
   .command("scan")
   .description(
-    "Scan dependency bumps (PR mode) or audit lockfile vs npm latest (--latest)",
+    "Scan dependency bumps (PR mode) or audit lockfile vs npm latest (--latest). Supports npm and pnpm lockfiles for --latest.",
   )
   .option("--path <projectDir>", "project directory to scan", process.cwd())
   .option("--latest", "audit: compare each package's locked version to npm latest", false)
@@ -72,10 +75,13 @@ program
   .option("--base-lock <file>", "PR mode: base package-lock.json")
   .option("--base-ref <git-ref>", "PR mode: git ref for base lockfile (e.g. origin/main)")
   .option("--head-lock <file>", "PR mode: head package-lock.json (default: <path>/package-lock.json)")
-  .option("--fail-on <level>", "exit non-zero when worst risk is at least: high|medium (or 'error' to also fail on analysis errors)")
+  .option("--fail-on <level>", "exit non-zero when risk is at least: high|medium|error")
   .option("--json", "print scan result as JSON", false)
-  .option("--markdown", "print Markdown scan summary", false)
-  .option("--verbose", "show extra flagged details", false)
+  .option("--markdown", "print Markdown scan summary (PR-friendly)", false)
+  .option("--sarif <file>", "write SARIF 2.1.0 results to a file")
+  .option("--verbose", "show flagged details, UP_TO_DATE rows, and all SKIPPED rows", false)
+  .option("--show-up-to-date", "list UP_TO_DATE packages in the table", false)
+  .option("--include-skipped", "list SKIPPED (untyped) packages in the table", false)
   .option("--include-dev", "include devDependency packages (default: true)", true)
   .option("--no-include-dev", "only production dependencies")
   .option("--follow-reexports", "trace consumer barrel re-exports", false)
@@ -91,13 +97,36 @@ program
     failOn?: string;
     json: boolean;
     markdown: boolean;
+    sarif?: string;
     verbose: boolean;
+    showUpToDate: boolean;
+    includeSkipped: boolean;
     includeDev: boolean;
     followReexports: boolean;
     workspaces: boolean;
     semverWeight: boolean;
   }) => {
     try {
+      const fileConfig = loadDepRiskConfig(opts.path);
+
+      // Precedence: CLI flags > .depriskrc > defaults
+      const failOn =
+        opts.failOn !== undefined
+          ? normalizeFailOn(opts.failOn)
+          : fileConfig.failOn;
+      const all = opts.all || Boolean(fileConfig.all);
+      const showUpToDate =
+        opts.showUpToDate || opts.verbose || Boolean(fileConfig.showUpToDate);
+      const includeSkipped =
+        opts.includeSkipped || opts.verbose || Boolean(fileConfig.includeSkipped);
+      // --no-include-dev from CLI always wins; otherwise rc can set includeDev
+      const includeDev = opts.includeDev === false
+        ? false
+        : (fileConfig.includeDev ?? opts.includeDev);
+      const followReexports = opts.followReexports || Boolean(fileConfig.followReexports);
+      const workspaces = opts.workspaces || Boolean(fileConfig.workspaces);
+      const semverWeight = opts.semverWeight || Boolean(fileConfig.semverWeight);
+
       if (opts.latest && (opts.baseLock || opts.baseRef)) {
         throw new Error(
           "Use either --latest (audit) or --base-lock/--base-ref (PR bumps), not both.",
@@ -108,23 +137,25 @@ program
           "Pass --latest, or --base-lock <file>, or --base-ref <git-ref> (e.g. origin/main).",
         );
       }
-      if (opts.all && !opts.latest) {
+      if (all && !opts.latest) {
         throw new Error("--all is only valid with --latest.");
       }
-
-      const failOn = normalizeFailOn(opts.failOn);
 
       const result = await runScan({
         path: opts.path,
         latest: opts.latest,
-        all: opts.all,
+        all,
         baseLock: opts.baseLock,
         baseRef: opts.baseRef,
         headLock: opts.headLock,
-        includeDev: opts.includeDev,
-        followReexports: opts.followReexports,
-        workspaces: opts.workspaces,
-        semverWeight: opts.semverWeight,
+        includeDev,
+        followReexports,
+        workspaces,
+        semverWeight,
+        concurrency: fileConfig.concurrency,
+        onLockfileWarning: (warning) => {
+          if (!opts.json) console.error(chalk.yellow(warning));
+        },
         onBump: (bump, index, total) => {
           if (!opts.json && !opts.markdown) {
             console.error(
@@ -136,12 +167,23 @@ program
         },
       });
 
+      if (opts.sarif) {
+        const sarif = formatScanSarif(result, { toolVersion: VERSION });
+        const out = path.resolve(opts.sarif);
+        writeSarifFile(out, sarif);
+        if (!opts.json && !opts.markdown) {
+          console.error(chalk.dim(`SARIF written to ${out}`));
+        }
+      }
+
       if (opts.json) {
         console.log(JSON.stringify({
           mode: result.mode,
           worstLevel: result.worstLevel,
+          lockfileKind: result.lockfileKind,
           reports: result.reports,
           upToDate: result.upToDate,
+          skipped: result.skipped,
           errors: result.errors,
         }, null, 2));
       } else if (opts.markdown) {
@@ -149,9 +191,12 @@ program
           mode: result.mode,
           reports: result.reports,
           upToDate: result.upToDate,
+          skipped: result.skipped,
           errors: result.errors,
           worstLevel: result.worstLevel,
           verbose: opts.verbose,
+          showUpToDate,
+          includeSkipped,
         }));
       } else {
         console.log();
@@ -159,17 +204,19 @@ program
           mode: result.mode,
           reports: result.reports,
           upToDate: result.upToDate,
+          skipped: result.skipped,
           errors: result.errors,
           worstLevel: result.worstLevel,
           verbose: opts.verbose,
+          showUpToDate,
+          includeSkipped,
         }));
       }
 
       const hasErrors = result.errors.length > 0;
       let exit = computeExitCode(result.worstLevel, failOn, hasErrors);
 
-      // No explicit gate but the scan produced only errors (nothing analyzable):
-      // signal a soft failure so the problem isn't silently ignored.
+      // Soft-fail when nothing analyzable and only hard errors (skipped alone is OK)
       if (!failOn && hasErrors && result.reports.length === 0 && exit === 0) {
         exit = 1;
       }
@@ -221,14 +268,25 @@ program
     semverWeight: boolean;
   }) => {
     try {
-      const failOn = normalizeFailOn(opts.failOn);
-      const report = await runCheck(packageName, opts);
+      const fileConfig = loadDepRiskConfig(opts.path);
+      const failOn = normalizeFailOn(opts.failOn) ?? fileConfig.failOn;
+      const report = await runCheck(packageName, {
+        ...opts,
+        followReexports: opts.followReexports || Boolean(fileConfig.followReexports),
+        workspaces: opts.workspaces || Boolean(fileConfig.workspaces),
+        semverWeight: opts.semverWeight || Boolean(fileConfig.semverWeight),
+      });
       const exit = computeExitCode(report.level, failOn);
       if (exit) process.exitCode = exit;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (opts.json) {
-        console.error(JSON.stringify({ error: message }));
+        console.error(JSON.stringify({
+          error: message,
+          skipped: isUntypedPackageError(err) || undefined,
+        }));
+      } else if (isUntypedPackageError(err)) {
+        console.error(chalk.yellow(`Skipped: ${message}`));
       } else {
         console.error(chalk.red(`Error: ${message}`));
       }

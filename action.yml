@@ -16,7 +16,7 @@ inputs:
     required: false
     default: "."
   fail-on:
-    description: "Fail the job when risk is at least this level (high|medium)"
+    description: "Fail the job when risk is at least this level: high|medium|error. SKIPPED (untyped) packages never fail the job; ERROR fails only when fail-on is error."
     required: false
     default: "high"
   github-token:

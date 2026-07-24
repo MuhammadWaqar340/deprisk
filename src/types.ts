@@ -73,6 +73,8 @@ export interface UntypedPackageResult {
   kind: "untyped";
   packageName: string;
   message: string;
+  /** Stable reason code for SKIPPED classification */
+  reason?: "no-types";
 }
 
 export type FetchResult = TypedPackagePaths | UntypedPackageResult;

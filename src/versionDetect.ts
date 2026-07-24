@@ -139,6 +139,7 @@ export function diffNpmLockfiles(
 
 /**
  * Parse top-level package versions from package-lock.json (v2/v3) text.
+ * Invalid JSON returns an empty map (lenient). Prefer parseNpmLockVersionsOrThrow for strict mode.
  */
 export function readNpmLockVersions(lockJson: string): Map<string, string> {
   const map = new Map<string, string>();
@@ -159,19 +160,129 @@ export function readNpmLockVersions(lockJson: string): Map<string, string> {
   return map;
 }
 
+/**
+ * Strict npm lock parse — throws a clear error on invalid JSON.
+ */
+export function parseNpmLockVersionsOrThrow(
+  lockJson: string,
+  fileLabel = "package-lock.json",
+): Map<string, string> {
+  if (!lockJson.trim()) {
+    throw new Error(
+      `${fileLabel} is empty.\n`
+        + `Regenerate it with: npm install`,
+    );
+  }
+  try {
+    JSON.parse(lockJson);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `${fileLabel} is not valid JSON (${msg}).\n`
+        + `Fix or regenerate the lockfile with: npm install`,
+    );
+  }
+  return readNpmLockVersions(lockJson);
+}
+
 function detectFromPnpmLock(lockPath: string, packageName?: string): VersionBump[] {
-  // Minimal parse: look for lines like `  /lodash@4.17.21:` under packages:
-  const text = fs.readFileSync(lockPath, "utf8");
+  const map = readPnpmLockVersions(fs.readFileSync(lockPath, "utf8"));
   const bumps: VersionBump[] = [];
-  const re = /^\s{2}\/(@?[^@\s]+)@([^:(]+):/gm;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) {
-    const name = m[1];
-    const version = m[2];
+  for (const [name, version] of map) {
     if (packageName && name !== packageName) continue;
     bumps.push({ packageName: name, fromVersion: version, toVersion: version });
   }
   return packageName ? bumps.filter((b) => b.packageName === packageName) : bumps;
+}
+
+/**
+ * Parse package versions from pnpm-lock.yaml.
+ *
+ * Supported key styles (packages: section):
+ * - `/lodash@4.17.21:`
+ * - `/@scope/name@1.2.3:`
+ * - `/lodash@4.17.21(peer@1.0.0):` → version `4.17.21`
+ *
+ * Documented support: lockfileVersion 5.x–10.x style `packages:` keys (common v7–v10 layouts).
+ * Empty content or packages with no resolvable entries throws via parsePnpmLockVersionsOrThrow.
+ */
+export function readPnpmLockVersions(lockText: string): Map<string, string> {
+  const map = new Map<string, string>();
+  // Match `/name@version` or `/@scope/name@version` optionally followed by (peers) then :
+  const re = /^\s{2}\/(@?[^@\s/]+(?:\/[^@\s]+)?)@([^:(]+)/gm;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(lockText))) {
+    const name = m[1];
+    const version = m[2];
+    if (!map.has(name)) map.set(name, version);
+  }
+  return map;
+}
+
+/**
+ * Strict pnpm lock parse.
+ */
+export function parsePnpmLockVersionsOrThrow(
+  lockText: string,
+  fileLabel = "pnpm-lock.yaml",
+): Map<string, string> {
+  if (!lockText.trim()) {
+    throw new Error(
+      `${fileLabel} is empty.\n`
+        + `Regenerate it with: pnpm install`,
+    );
+  }
+  if (!/packages\s*:/.test(lockText) && !/importers\s*:/.test(lockText)) {
+    throw new Error(
+      `${fileLabel} does not look like a pnpm lockfile (missing packages:/importers:).\n`
+        + `Regenerate it with: pnpm install`,
+    );
+  }
+  const map = readPnpmLockVersions(lockText);
+  if (map.size === 0) {
+    throw new Error(
+      `${fileLabel} has no resolvable package entries under packages:.\n`
+        + `Regenerate it with: pnpm install`,
+    );
+  }
+  return map;
+}
+
+/**
+ * Diff two lockfile texts of the same kind into version bumps.
+ */
+export function diffLockfileVersions(
+  kind: "npm" | "pnpm" | "yarn",
+  baseText: string,
+  headText: string,
+  packageName?: string,
+): VersionBump[] {
+  if (kind === "yarn") {
+    throw new Error(
+      "Yarn lockfile PR diffs are not supported yet.\n"
+        + "Use package-lock.json or pnpm-lock.yaml.",
+    );
+  }
+  const baseVersions =
+    kind === "pnpm"
+      ? parsePnpmLockVersionsOrThrow(baseText, "base pnpm-lock.yaml")
+      : parseNpmLockVersionsOrThrow(baseText, "base package-lock.json");
+  const headVersions =
+    kind === "pnpm"
+      ? parsePnpmLockVersionsOrThrow(headText, "head pnpm-lock.yaml")
+      : parseNpmLockVersionsOrThrow(headText, "head package-lock.json");
+
+  const names = new Set([...baseVersions.keys(), ...headVersions.keys()]);
+  const bumps: VersionBump[] = [];
+  for (const name of names) {
+    if (packageName && name !== packageName) continue;
+    const fromVersion = baseVersions.get(name);
+    const toVersion = headVersions.get(name);
+    if (!fromVersion || !toVersion) continue;
+    if (fromVersion === toVersion) continue;
+    bumps.push({ packageName: name, fromVersion, toVersion });
+  }
+  return bumps;
 }
 
 function detectFromYarnLock(lockPath: string, packageName?: string): VersionBump[] {

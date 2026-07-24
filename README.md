@@ -1,8 +1,18 @@
 # DepRisk
 
-CLI that tells you whether an npm dependency update is actually risky — not by reading changelogs, but by checking whether the specific exports your project calls were changed, deprecated, or removed.
+DepRisk analyzes dependency upgrades against your actual TypeScript/JavaScript usage.
 
-Dependabot/Renovate say "this package went from v4 → v5." DepRisk answers: "did the parts *you* use change?"
+It does **not** simply ask: “Did the package change?”  
+It asks: “Did something my code actually uses change?”
+
+```text
+axios  0.21.4 → 1.18.1
+Package API changes: many
+Used API changes: 0
+Risk: LOW
+```
+
+A major bump can be LOW if you don’t use the breaking APIs. A small bump can be MEDIUM/HIGH if you do.
 
 ## Install
 
@@ -28,19 +38,21 @@ deprisk check lodash --from 4.17.20 --to 4.17.21 --path ./my-app
 # Single package: locked version vs npm latest (no --from/--to needed)
 deprisk check axios --latest --path ./my-app
 
-# Audit: every direct dependency in package-lock.json vs npm latest
+# Audit: direct deps vs npm latest (npm or pnpm lockfile)
 deprisk scan --latest --path ./my-app
 
 # Audit including every top-level lockfile package
 deprisk scan --latest --all
 
-# PR mode: all bumps vs main
-deprisk scan --base-ref origin/main
+# PR mode: all bumps vs main (npm package-lock.json)
+deprisk scan --base-ref origin/main --markdown --sarif deprisk.sarif
 ```
 
 ### Audit lockfile against latest (`deprisk scan --latest`)
 
-Reads versions from `package-lock.json`, looks up npm **latest** for each package, and runs DepRisk for **locked → latest**.
+Reads locked versions from **`package-lock.json` or `pnpm-lock.yaml`**, looks up npm **latest**, and runs DepRisk for **locked → latest**.
+
+If both lockfiles exist, DepRisk prefers **pnpm** and prints a warning.
 
 | Flag | Description |
 |------|-------------|
@@ -49,33 +61,77 @@ Reads versions from `package-lock.json`, looks up npm **latest** for each packag
 | `--no-include-dev` | Skip `devDependencies` |
 | `--path <dir>` | Project root |
 | `--json` / `--markdown` | Machine / PR output |
-| `--fail-on high\|medium` | Gate on worst risk |
+| `--sarif <file>` | Write SARIF 2.1.0 results |
+| `--show-up-to-date` | List UP_TO_DATE packages (hidden by default) |
+| `--include-skipped` | List SKIPPED untyped packages in the table |
+| `--fail-on high\|medium\|error` | Gate on worst risk / errors |
 
-Packages already on latest are reported as `UP_TO_DATE` (not re-analyzed).
+Default output shows a **Summary** (counts for HIGH/MEDIUM/LOW/SKIPPED/ERROR/UP_TO_DATE) plus analyzed packages. Packages already on latest are counted, not listed, unless `--show-up-to-date` / `--verbose`.
+
+### Statuses
+
+| Status | Meaning |
+|--------|---------|
+| **HIGH / MEDIUM / LOW** | Usage-aware API risk for analyzed packages |
+| **UP_TO_DATE** | Locked version === npm latest (not re-analyzed) |
+| **SKIPPED** | No bundled `.d.ts` and no usable `@types/*` — cannot API-diff; **not** a CI failure by default |
+| **ERROR** | Network/fetch/parser failure or unexpected analysis error |
 
 ### Single package vs latest (`deprisk check <pkg> --latest`)
 
-Same idea for one dependency — no need to type versions:
-
 ```bash
 deprisk check axios --latest
-# optional: override the locked “from” version
 deprisk check axios --from 0.27.2 --latest
 ```
 
-| Flag | Description |
-|------|-------------|
-| `--latest` | Compare locked (or `--from`) version to npm latest |
-| `--from <version>` | Optional override instead of lockfile |
-| `--path <dir>` | Project with `package-lock.json` |
-
 ### PR bump scan (`deprisk scan --base-ref` / `--base-lock`)
+
+Currently supports **npm `package-lock.json` and pnpm `pnpm-lock.yaml`** for base/head diffs. Yarn is not supported for PR mode.
 
 | Flag | Description |
 |------|-------------|
 | `--base-lock <file>` | Base branch lockfile |
 | `--base-ref <git-ref>` | e.g. `origin/main` |
 | `--head-lock <file>` | Head lockfile (default: `./package-lock.json`) |
+
+### Configuration (`.depriskrc.json`)
+
+Optional project config. **CLI flags always override** the file.
+
+```json
+{
+  "failOn": "high",
+  "includeDev": true,
+  "followReexports": false,
+  "workspaces": false,
+  "semverWeight": false,
+  "showUpToDate": false,
+  "includeSkipped": false,
+  "all": false,
+  "concurrency": 4
+}
+```
+
+Also accepts `.depriskrc` (same JSON). Unknown keys or invalid values fail with a clear error.
+
+### SARIF output
+
+```bash
+deprisk scan --latest --sarif deprisk-results.sarif
+deprisk scan --base-ref origin/main --markdown --sarif deprisk-results.sarif
+```
+
+Writes [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) with rule IDs such as `DEP-RISK-HIGH`, `DEP-RISK-MEDIUM`, `DEP-RISK-API-REMOVED`, `DEP-RISK-API-CHANGED`, including package versions and `file:line` when available. DepRisk structurally validates emitted SARIF; treat GitHub Code Scanning upload as something to verify in your own CI rather than a guaranteed integration.
+
+### Supported lockfiles
+
+| Feature | npm `package-lock.json` | pnpm `pnpm-lock.yaml` | Yarn `yarn.lock` |
+|---------|-------------------------|------------------------|------------------|
+| `check … --latest` (locked version) | Yes | Yes | Partial |
+| `scan --latest` | Yes | Yes | Not yet |
+| `scan --base-ref` / `--base-lock` (PR) | Yes | Yes | Not yet |
+
+If multiple lockfiles exist, DepRisk prefers **pnpm → npm → yarn** and prints a warning.
 
 ### `deprisk check` options
 
@@ -89,7 +145,7 @@ deprisk check axios --from 0.27.2 --latest
 | `--json` | Emit machine-readable `RiskReport` |
 | `--markdown` | Emit Markdown (PR comments) |
 | `--html <file>` | Write an HTML report |
-| `--fail-on high\|medium\|error` | Exit non-zero when risk meets the threshold (`error` also fails on analysis errors) |
+| `--fail-on high\|medium\|error` | Exit non-zero when risk meets the threshold |
 | `--follow-reexports` | Trace consumer barrel files |
 | `--workspaces` | Also scan monorepo workspace packages |
 | `--semver-weight` | Weight major-version bumps more heavily |
@@ -99,22 +155,19 @@ deprisk check axios --from 0.27.2 --latest
 | Code | Meaning |
 |------|---------|
 | `0` | LOW (or below `--fail-on` threshold) |
-| `1` | MEDIUM (default) or runtime error |
+| `1` | MEDIUM (default) or runtime / analysis ERROR |
 | `2` | HIGH |
 
 ### `--fail-on`
 
-Both `check` and `scan` accept `--fail-on`:
-
 | Value | Fails the build on |
 |-------|--------------------|
-| `high` | HIGH only (analysis errors ignored) |
-| `medium` | HIGH or MEDIUM (analysis errors ignored) |
-| `error` | HIGH, MEDIUM, **or any analysis error** (untyped/fetch failures) |
-
-Without `--fail-on`, exit is by risk (HIGH=2, MEDIUM=1, LOW=0); a scan that produces *only* errors and nothing analyzable still exits `1`. Use `--fail-on error` to gate CI on packages DepRisk couldn't analyze:
+| `high` | HIGH only (SKIPPED and ERROR ignored) |
+| `medium` | HIGH or MEDIUM (SKIPPED ignored) |
+| `error` | HIGH, MEDIUM, **or any ERROR** (SKIPPED still ignored) |
 
 ```bash
+deprisk scan --latest --fail-on high
 deprisk scan --latest --fail-on error
 ```
 
@@ -131,6 +184,8 @@ If a package ships no `.d.ts`, DepRisk falls back to `@types/<package>`:
 1. Exact `@types` version match when published  
 2. Else highest `@types` version with the same **major**  
 3. Else latest `@types` version  
+
+If neither bundled types nor `@types/*` exist, the package is **SKIPPED** (not ERROR). Use `--include-skipped` to list them in the scan table.
 
 ### `.depriskignore`
 
@@ -190,22 +245,77 @@ pnpm run build
 
 See [benchmarks/CORPUS.md](./benchmarks/CORPUS.md).
 
-## Out of scope
+## Out of scope / limitations
 
 - Hosted dashboard / SaaS  
 - Auto-fix or code-mod suggestions  
-- Analyzing packages with **neither** bundled types nor `@types/*`
+- Packages with **neither** bundled types nor `@types/*` → **SKIPPED** (API analysis unavailable)  
+- Runtime behavior changes that keep the same TypeScript signature may still be missed  
+- PR bump mode supports npm and pnpm lockfiles; Yarn PR / Yarn `--latest` are not supported yet  
+- `--latest` supports npm + pnpm  
+- Yarn `--latest` scan is not fully supported yet  
+
+## Migrating from 0.7.x to 0.8.0
+
+### UP_TO_DATE output
+
+Packages already on npm latest are **summarized by count** in scan output, not listed row-by-row.
+
+To list them:
+
+```bash
+deprisk scan --latest --show-up-to-date
+# or
+deprisk scan --latest --verbose
+```
+
+### ERROR vs SKIPPED
+
+Packages with **no usable TypeScript types** (no bundled `.d.ts` and no `@types/*`) are now **`SKIPPED`**, not `ERROR`.
+
+- `SKIPPED` means API analysis is unavailable — **not** a dependency risk finding.
+- `SKIPPED` does **not** fail `--fail-on high|medium|error`.
+- `ERROR` is reserved for network/fetch/parser failures.
+
+List skipped packages with `--include-skipped`.
+
+### New in 0.8.0
+
+- `.depriskrc.json` / `.depriskrc` project config (CLI overrides file)
+- `scan --latest` for **pnpm-lock.yaml** (as well as npm)
+- Multi-lockfile detection (prefers pnpm, warns when multiple exist)
+- `--sarif <file>` SARIF 2.1.0 export (structurally validated)
+- `--show-up-to-date` / `--include-skipped`
+- PR bump mode supports **npm and pnpm** lockfiles (Yarn PR/`--latest` still unsupported)
+
+### JSON output
+
+Additive fields only: `skipped`, `lockfileKind`. Existing `reports`, `worstLevel`, and `errors` remain.
+
+### Limitations (unchanged honesty)
+
+- Yarn `--latest` and Yarn PR mode are **not** supported (clear error)
+- pnpm parsing covers common `packages:` key styles (lockfileVersion 5.x–10.x); exotic layouts may need follow-up
+- Runtime-only behavior changes with identical TypeScript signatures can still be missed
+- SARIF is validated structurally for DepRisk’s emitted shape; upload to GitHub Code Scanning should be verified in your CI
+
+## 0.8.0
+
+- **SKIPPED** vs **ERROR** — untyped/native packages no longer flood ERROR / fail CI by default  
+- Quieter scan output — Summary counts; UP_TO_DATE hidden unless `--show-up-to-date`  
+- **pnpm** support for `scan --latest` + multi-lockfile detection (prefers pnpm, warns)  
+- **`.depriskrc.json`** project config (CLI overrides file)  
+- **`--sarif <file>`** SARIF 2.1.0 export  
+- Clearer Markdown PR reports  
 
 ## 0.7.1
 
-- `--fail-on error` — gate `check`/`scan` on any package DepRisk couldn't analyze (untyped/fetch errors), in addition to HIGH/MEDIUM. `high`/`medium` now ignore analysis errors.
-- `--fail-on` values are validated (`high|medium|error`).
+- `--fail-on error` — gate on analysis ERRORS; `high`/`medium` ignore them  
+- `--fail-on` values validated (`high|medium|error`)
 
 ## 0.7.0
 
-- `deprisk scan --latest` — audit `package-lock.json` versions against npm latest (API-usage risk)
-- `deprisk check <pkg> --latest` — one package: locked → npm latest (no `--from`/`--to`)
-- `deprisk scan --base-ref` / `--base-lock` — PR bump scan (restored alongside latest mode)
+- `deprisk scan --latest` / `deprisk check <pkg> --latest` / PR bump scan
 
 ## License
 

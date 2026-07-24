@@ -4,13 +4,8 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { fetchPackageVersions } from "./fetcher.js";
-import { diffApiSurfaces } from "./apiDiff.js";
-import { scanPackageUsage } from "./usageScanner.js";
-import { scoreRisk } from "./riskScorer.js";
-import { diffNpmLockfiles } from "./versionDetect.js";
+import { runAction, formatActionReports } from "./actionRun.js";
 import { formatMarkdownReport } from "./reportFormat.js";
-import type { RiskReport, VersionBump } from "./types.js";
 
 function getInput(name: string, fallback = ""): string {
   const key = `INPUT_${name.replace(/ /g, "_").toUpperCase()}`;
@@ -19,83 +14,45 @@ function getInput(name: string, fallback = ""): string {
 
 async function main(): Promise<void> {
   const projectPath = path.resolve(getInput("path", "."));
-  const failOn = getInput("fail-on", "high").toLowerCase();
-  const packageFilter = getInput("package");
-  const from = getInput("from");
-  const to = getInput("to");
-  const baseLock = getInput("base-lockfile");
-  const headLock = getInput("head-lockfile");
-  const token = getInput("github-token", process.env.GITHUB_TOKEN ?? "");
+  const result = await runAction({
+    projectPath,
+    failOnRaw: getInput("fail-on", "high"),
+    packageFilter: getInput("package") || undefined,
+    from: getInput("from") || undefined,
+    to: getInput("to") || undefined,
+    baseLock: getInput("base-lockfile") || undefined,
+    headLock: getInput("head-lockfile") || undefined,
+  });
 
-  const bumps: VersionBump[] = [];
-
-  if (packageFilter && from && to) {
-    bumps.push({ packageName: packageFilter, fromVersion: from, toVersion: to });
-  } else if (baseLock && headLock && fs.existsSync(baseLock) && fs.existsSync(headLock)) {
-    bumps.push(
-      ...diffNpmLockfiles(
-        fs.readFileSync(baseLock, "utf8"),
-        fs.readFileSync(headLock, "utf8"),
-        packageFilter || undefined,
-      ),
-    );
-  } else if (packageFilter && from && to) {
-    bumps.push({ packageName: packageFilter, fromVersion: from, toVersion: to });
-  }
-
-  if (bumps.length === 0) {
+  if (result.reports.length === 0 && result.skipped.length === 0 && result.errors.length === 0) {
     console.log("No dependency version bumps detected — nothing to check.");
-    return;
   }
 
-  const reports: RiskReport[] = [];
-
-  for (const bump of bumps) {
-    console.log(`Checking ${bump.packageName} ${bump.fromVersion} → ${bump.toVersion}`);
-    const fetched = await fetchPackageVersions(
-      bump.packageName,
-      bump.fromVersion,
-      bump.toVersion,
+  for (const report of result.reports) {
+    console.log(
+      `Checking ${report.packageName} ${report.fromVersion} → ${report.toVersion}`,
     );
-    if (fetched.kind === "untyped") {
-      console.warn(fetched.message);
-      continue;
-    }
-    const diff = diffApiSurfaces(fetched.oldTypesEntry, fetched.newTypesEntry);
-    const usage = scanPackageUsage(projectPath, bump.packageName, {
-      followReexports: true,
-    });
-    const report = scoreRisk({
-      packageName: bump.packageName,
-      fromVersion: bump.fromVersion,
-      toVersion: bump.toVersion,
-      diff,
-      usage,
-      typesSource: fetched.typesSource,
-      semverWeighting: true,
-    });
-    reports.push(report);
     console.log(formatMarkdownReport(report));
   }
-
-  if (token && process.env.GITHUB_EVENT_PATH) {
-    await maybeCommentOnPr(token, reports);
+  for (const s of result.skipped) {
+    console.warn(`Skipped ${s.packageName}: ${s.message}`);
+  }
+  for (const e of result.errors) {
+    console.error(`Error ${e.packageName}: ${e.message}`);
   }
 
-  const worst = worstLevel(reports);
-  if (failOn === "high" && worst === "HIGH") process.exitCode = 2;
-  if (failOn === "medium" && (worst === "HIGH" || worst === "MEDIUM")) {
-    process.exitCode = worst === "HIGH" ? 2 : 1;
+  const token = getInput("github-token", process.env.GITHUB_TOKEN ?? "");
+  if (token && process.env.GITHUB_EVENT_PATH && result.reports.length > 0) {
+    await maybeCommentOnPr(token, result.reports);
   }
+
+  if (result.exitCode) process.exitCode = result.exitCode;
 }
 
-function worstLevel(reports: RiskReport[]): "HIGH" | "MEDIUM" | "LOW" {
-  if (reports.some((r) => r.level === "HIGH")) return "HIGH";
-  if (reports.some((r) => r.level === "MEDIUM")) return "MEDIUM";
-  return "LOW";
-}
-
-async function maybeCommentOnPr(token: string, reports: RiskReport[]): Promise<void> {
+async function maybeCommentOnPr(
+  token: string,
+  reports: Parameters<typeof formatActionReports>[0],
+): Promise<void> {
   try {
     const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH!, "utf8")) as {
       pull_request?: { number: number };
@@ -105,11 +62,7 @@ async function maybeCommentOnPr(token: string, reports: RiskReport[]): Promise<v
     const repo = process.env.GITHUB_REPOSITORY ?? event.repository?.full_name;
     if (!pr || !repo) return;
 
-    const body = [
-      "<!-- deprisk-bot -->",
-      ...reports.map(formatMarkdownReport),
-    ].join("\n\n---\n\n");
-
+    const body = ["<!-- deprisk-bot -->", formatActionReports(reports)].join("\n\n");
     const url = `https://api.github.com/repos/${repo}/issues/${pr}/comments`;
     const res = await fetch(url, {
       method: "POST",

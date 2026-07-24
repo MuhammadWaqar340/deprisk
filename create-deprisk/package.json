@@ -1,6 +1,6 @@
 {
   "name": "create-deprisk",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Scaffold a DepRisk GitHub Actions workflow — run: npx create-deprisk",
   "type": "module",
   "bin": {

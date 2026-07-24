@@ -22,7 +22,7 @@ function parseArgs(argv) {
     else if (arg === "--path" || arg === "-p") opts.path = argv[++i] ?? opts.path;
     else if (arg === "--fail-on") {
       const v = argv[++i];
-      opts.failOn = v === "medium" ? "medium" : "high";
+      opts.failOn = v === "medium" ? "medium" : v === "error" ? "error" : "high";
     } else if (arg === "--output" || arg === "-o") opts.output = argv[++i] ?? opts.output;
   }
 
@@ -40,7 +40,7 @@ Usage:
 Options:
   --path, -p <dir>       Project directory (default: cwd)
   --force, -f            Overwrite existing workflow
-  --fail-on <high|medium>  PR check failure threshold (default: high)
+  --fail-on <high|medium|error>  PR check failure threshold (default: high)
   --output, -o <file>    Workflow path (default: .github/workflows/deprisk.yml)
   --help, -h             Show help
 `);
@@ -58,7 +58,7 @@ const result = initGitHubWorkflow({
   force: opts.force,
   failOn: opts.failOn,
   output: opts.output,
-  packageVersion: "0.7.1",
+  packageVersion: "0.8.0",
 });
 
 if (result.skipped) {
