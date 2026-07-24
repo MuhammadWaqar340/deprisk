@@ -1,15 +1,46 @@
 import { Project, type SourceFile, type ExportedDeclarations, Node } from "ts-morph";
 import type { ApiDiffEntry, ChangeKind } from "./types.js";
 
+export interface ParamInfo {
+  name: string;
+  optional: boolean;
+  rest: boolean;
+  typeText: string;
+}
+
+export interface FunctionSignatureInfo {
+  params: ParamInfo[];
+  returnType: string;
+  typeParams: string[];
+  /** Constraint text per type param (empty string if unconstrained) */
+  typeParamConstraints: string[];
+}
+
+export interface PropertyInfo {
+  name: string;
+  optional: boolean;
+  typeText: string;
+}
+
+export interface MethodInfo {
+  name: string;
+  signatures: FunctionSignatureInfo[];
+}
+
 export interface ExtractedSymbol {
   name: string;
   signature: string;
   deprecated: boolean;
+  kind?: "function" | "class" | "interface" | "type" | "enum" | "variable" | "namespace";
+  /** Call signatures / overloads when the export is callable */
+  callSignatures?: FunctionSignatureInfo[];
+  properties?: PropertyInfo[];
+  methods?: MethodInfo[];
 }
 
 /**
  * Extract the public API surface from a package's .d.ts entry file,
- * following local `export sadasd * from './…'` re-exports within the package.
+ * following local relative `export … from './…'` re-exports within the package.
  */
 export function extractApiSurface(typesEntryPath: string): Map<string, ExtractedSymbol> {
   const project = new Project({
@@ -38,8 +69,6 @@ export function normalizeDefaultExport(
 ): Map<string, ExtractedSymbol> {
   const result = new Map(symbols);
 
-  // Common pattern: both `default` and a same-named callable; keep both but
-  // canonicalize default signature to strip "default" vs package-name aliases.
   const def = result.get("default");
   if (def) {
     const normalized = {
@@ -49,15 +78,10 @@ export function normalizeDefaultExport(
     result.set("default", normalized);
   }
 
-  // If only a non-default export named like the main export exists and there's
-  // no default, leave as-is. If we have `export = fn` represented as default
-  // in one version and as a named export that mirrors default in another,
-  // align via signature equality checked later in diff.
   return result;
 }
 
 function canonicalizeDefaultSignature(sig: string): string {
-  // "function default(...): T" and "function clsx(...): T" → compare param/return shape
   return sig
     .replace(/^function\s+\w+/, "function default")
     .replace(/^const\s+\w+/, "const default")
@@ -80,11 +104,7 @@ function collectExports(
     if (symbols.has(name)) continue;
     const decl = declarations[0];
     if (!decl) continue;
-    symbols.set(name, {
-      name,
-      signature: formatSignature(name, decl),
-      deprecated: hasDeprecatedTag(decl),
-    });
+    symbols.set(name, buildExtractedSymbol(name, declarations));
   }
 
   for (const exportDecl of sourceFile.getExportDeclarations()) {
@@ -95,6 +115,201 @@ function collectExports(
       }
     }
   }
+}
+
+function buildExtractedSymbol(name: string, declarations: ExportedDeclarations[]): ExtractedSymbol {
+  const primary = declarations[0]!;
+  const signature = formatSignature(name, primary);
+  const deprecated = hasDeprecatedTag(primary);
+  const structured = extractStructured(name, declarations);
+
+  return {
+    name,
+    signature,
+    deprecated,
+    ...structured,
+  };
+}
+
+function extractStructured(
+  name: string,
+  declarations: ExportedDeclarations[],
+): Pick<ExtractedSymbol, "kind" | "callSignatures" | "properties" | "methods"> {
+  const callSignatures: FunctionSignatureInfo[] = [];
+  let properties: PropertyInfo[] | undefined;
+  let methods: MethodInfo[] | undefined;
+  let kind: ExtractedSymbol["kind"];
+
+  for (const decl of declarations) {
+    if (Node.isFunctionDeclaration(decl) || Node.isMethodDeclaration(decl)) {
+      kind = "function";
+      callSignatures.push(signatureFromCallable(decl));
+      continue;
+    }
+
+    if (Node.isClassDeclaration(decl)) {
+      kind = "class";
+      const classMethods: MethodInfo[] = [];
+      for (const member of decl.getMembers()) {
+        if (Node.isMethodDeclaration(member) || Node.isMethodSignature(member)) {
+          const mName = member.getName();
+          const existing = classMethods.find((m) => m.name === mName);
+          const sig = signatureFromCallable(member);
+          if (existing) existing.signatures.push(sig);
+          else classMethods.push({ name: mName, signatures: [sig] });
+        }
+        if (Node.isPropertyDeclaration(member) || Node.isPropertySignature(member)) {
+          properties ??= [];
+          properties.push({
+            name: member.getName(),
+            optional: member.hasQuestionToken?.() ?? false,
+            typeText: member.getTypeNode()?.getText() ?? member.getType().getText(member),
+          });
+        }
+      }
+      const ctors = decl.getConstructors();
+      for (const ctor of ctors) {
+        callSignatures.push(signatureFromCallable(ctor));
+      }
+      if (classMethods.length) methods = classMethods;
+      continue;
+    }
+
+    if (Node.isInterfaceDeclaration(decl)) {
+      kind = "interface";
+      properties = [];
+      const ifaceMethods: MethodInfo[] = [];
+      for (const member of decl.getMembers()) {
+        if (Node.isMethodSignature(member)) {
+          const mName = member.getName();
+          const existing = ifaceMethods.find((m) => m.name === mName);
+          const sig = signatureFromCallable(member);
+          if (existing) existing.signatures.push(sig);
+          else ifaceMethods.push({ name: mName, signatures: [sig] });
+        } else if (Node.isPropertySignature(member) || Node.isPropertyDeclaration(member)) {
+          properties.push({
+            name: member.getName(),
+            optional: member.hasQuestionToken(),
+            typeText: member.getTypeNode()?.getText() ?? member.getType().getText(member),
+          });
+        } else if (Node.isCallSignatureDeclaration(member)) {
+          callSignatures.push(signatureFromCallable(member));
+        }
+      }
+      if (ifaceMethods.length) methods = ifaceMethods;
+      continue;
+    }
+
+    if (Node.isTypeAliasDeclaration(decl)) {
+      kind = "type";
+      const typeNode = decl.getTypeNode();
+      if (typeNode && Node.isFunctionTypeNode(typeNode)) {
+        callSignatures.push({
+          params: typeNode.getParameters().map(paramFromNode),
+          returnType: typeNode.getReturnTypeNode()?.getText() ?? "unknown",
+          typeParams: typeNode.getTypeParameters().map((t) => t.getName()),
+          typeParamConstraints: typeNode.getTypeParameters().map((t) =>
+            t.getConstraint()?.getText() ?? ""
+          ),
+        });
+      } else if (typeNode && Node.isTypeLiteral(typeNode)) {
+        properties = [];
+        for (const member of typeNode.getMembers()) {
+          if (Node.isPropertySignature(member)) {
+            properties.push({
+              name: member.getName(),
+              optional: member.hasQuestionToken(),
+              typeText: member.getTypeNode()?.getText() ?? member.getType().getText(member),
+            });
+          } else if (Node.isMethodSignature(member)) {
+            methods ??= [];
+            const mName = member.getName();
+            const existing = methods.find((m) => m.name === mName);
+            const sig = signatureFromCallable(member);
+            if (existing) existing.signatures.push(sig);
+            else methods.push({ name: mName, signatures: [sig] });
+          }
+        }
+      }
+      continue;
+    }
+
+    if (Node.isEnumDeclaration(decl)) {
+      kind = "enum";
+      continue;
+    }
+
+    if (Node.isVariableDeclaration(decl)) {
+      kind = "variable";
+      const typeNode = decl.getTypeNode();
+      if (typeNode && Node.isFunctionTypeNode(typeNode)) {
+        callSignatures.push({
+          params: typeNode.getParameters().map(paramFromNode),
+          returnType: typeNode.getReturnTypeNode()?.getText() ?? "unknown",
+          typeParams: typeNode.getTypeParameters().map((t) => t.getName()),
+          typeParamConstraints: typeNode.getTypeParameters().map((t) =>
+            t.getConstraint()?.getText() ?? ""
+          ),
+        });
+      }
+      // Overload-style: const fn: { (a: string): T; (a: number): T }
+      if (typeNode && Node.isTypeLiteral(typeNode)) {
+        for (const member of typeNode.getMembers()) {
+          if (Node.isCallSignatureDeclaration(member)) {
+            callSignatures.push(signatureFromCallable(member));
+          }
+        }
+      }
+      continue;
+    }
+
+    if (Node.isModuleDeclaration(decl)) {
+      kind = "namespace";
+    }
+  }
+
+  // Multiple FunctionDeclarations with same name = overloads
+  if (declarations.length > 1 && declarations.every((d) => Node.isFunctionDeclaration(d))) {
+    kind = "function";
+    callSignatures.length = 0;
+    for (const d of declarations) {
+      if (Node.isFunctionDeclaration(d)) callSignatures.push(signatureFromCallable(d));
+    }
+  }
+
+  return {
+    kind,
+    ...(callSignatures.length ? { callSignatures } : {}),
+    ...(properties?.length ? { properties } : {}),
+    ...(methods?.length ? { methods } : {}),
+  };
+}
+
+function signatureFromCallable(decl: {
+  getParameters: () => import("ts-morph").ParameterDeclaration[];
+  getReturnTypeNode?: () => import("ts-morph").TypeNode | undefined;
+  getReturnType?: () => { getText: (enclosing?: Node) => string };
+  getTypeParameters?: () => import("ts-morph").TypeParameterDeclaration[];
+}): FunctionSignatureInfo {
+  const params = decl.getParameters().map(paramFromNode);
+  const returnType =
+    decl.getReturnTypeNode?.()?.getText()
+    ?? decl.getReturnType?.()?.getText(decl as unknown as Node)
+    ?? "unknown";
+  const typeParams = (decl.getTypeParameters?.() ?? []).map((t) => t.getName());
+  const typeParamConstraints = (decl.getTypeParameters?.() ?? []).map(
+    (t) => t.getConstraint()?.getText() ?? "",
+  );
+  return { params, returnType, typeParams, typeParamConstraints };
+}
+
+function paramFromNode(p: import("ts-morph").ParameterDeclaration): ParamInfo {
+  return {
+    name: p.getName(),
+    optional: p.isOptional(),
+    rest: p.isRestParameter(),
+    typeText: p.getTypeNode()?.getText() ?? p.getType().getText(p),
+  };
 }
 
 function formatSignature(name: string, decl: ExportedDeclarations): string {
@@ -178,9 +393,18 @@ function hasDeprecatedTag(decl: ExportedDeclarations): boolean {
 export function diffApiSurfaces(oldTypesEntry: string, newTypesEntry: string): ApiDiffEntry[] {
   const oldSymbols = extractApiSurface(oldTypesEntry);
   const newSymbols = extractApiSurface(newTypesEntry);
+  return diffExtractedSurfaces(oldSymbols, newSymbols);
+}
 
-  // If old has `default` and new lost it but gained an equivalent-shaped export
-  // (or vice versa), treat matching canonical signatures as unchanged default.
+/**
+ * Diff already-extracted symbol maps (avoids re-parsing when callers need structure).
+ */
+export function diffExtractedSurfaces(
+  oldSymbolsIn: Map<string, ExtractedSymbol>,
+  newSymbolsIn: Map<string, ExtractedSymbol>,
+): ApiDiffEntry[] {
+  const oldSymbols = new Map(oldSymbolsIn);
+  const newSymbols = new Map(newSymbolsIn);
   alignDefaultAcrossVersions(oldSymbols, newSymbols);
 
   const names = new Set([...oldSymbols.keys(), ...newSymbols.keys()]);
@@ -218,13 +442,14 @@ export function diffApiSurfaces(oldTypesEntry: string, newTypesEntry: string): A
         ? canonicalizeDefaultSignature(newSym.signature)
         : newSym.signature;
 
-      const signatureChanged = oldCanon !== newCanon;
+      const signatureChanged = oldCanon !== newCanon
+        || overloadSetChanged(oldSym, newSym);
       const newlyDeprecated = !oldSym.deprecated && newSym.deprecated;
 
       if (signatureChanged || newlyDeprecated) {
-        const changeKind = classifyChangeKind(
-          oldSym.signature,
-          newSym.signature,
+        const changeKind = classifyChangeKindStructured(
+          oldSym,
+          newSym,
           newlyDeprecated,
           signatureChanged,
         );
@@ -250,11 +475,20 @@ export function diffApiSurfaces(oldTypesEntry: string, newTypesEntry: string): A
   return results;
 }
 
-/**
- * When one side only has `default` and the other only has a primary named export
- * with the same canonical signature, copy default onto both maps so we don't
- * spuriously mark default as removed/added.
- */
+function overloadSetChanged(oldSym: ExtractedSymbol, newSym: ExtractedSymbol): boolean {
+  const oldN = oldSym.callSignatures?.length ?? 0;
+  const newN = newSym.callSignatures?.length ?? 0;
+  if (oldN !== newN) return true;
+  if (oldN <= 1) return false;
+  const oldKeys = (oldSym.callSignatures ?? []).map(sigKey).sort().join("|");
+  const newKeys = (newSym.callSignatures ?? []).map(sigKey).sort().join("|");
+  return oldKeys !== newKeys;
+}
+
+function sigKey(s: FunctionSignatureInfo): string {
+  return `${s.params.map((p) => `${p.rest ? "..." : ""}${p.optional ? "?" : ""}${p.typeText}`).join(",")}>${s.returnType}`;
+}
+
 function alignDefaultAcrossVersions(
   oldSymbols: Map<string, ExtractedSymbol>,
   newSymbols: Map<string, ExtractedSymbol>,
@@ -266,9 +500,9 @@ function alignDefaultAcrossVersions(
     const match = findEquivalentExport(newSymbols, oldDef);
     if (match) {
       newSymbols.set("default", {
+        ...match,
         name: "default",
         signature: canonicalizeDefaultSignature(match.signature),
-        deprecated: match.deprecated,
       });
     }
   }
@@ -277,9 +511,9 @@ function alignDefaultAcrossVersions(
     const match = findEquivalentExport(oldSymbols, newDef);
     if (match) {
       oldSymbols.set("default", {
+        ...match,
         name: "default",
         signature: canonicalizeDefaultSignature(match.signature),
-        deprecated: match.deprecated,
       });
     }
   }
@@ -297,6 +531,55 @@ function findEquivalentExport(
     }
   }
   return undefined;
+}
+
+export function classifyChangeKindStructured(
+  oldSym: ExtractedSymbol,
+  newSym: ExtractedSymbol,
+  newlyDeprecated: boolean,
+  signatureChanged: boolean,
+): ChangeKind {
+  if (newlyDeprecated && !signatureChanged) return "deprecated";
+  if (newlyDeprecated && signatureChanged) return "signature_changed";
+
+  const oldSigs = oldSym.callSignatures;
+  const newSigs = newSym.callSignatures;
+  if (oldSigs?.length && newSigs?.length) {
+    const oldPrimary = oldSigs[0]!;
+    const newPrimary = newSigs[0]!;
+    const oldRequired = countRequired(oldPrimary);
+    const newRequired = countRequired(newPrimary);
+    const oldMax = maxArity(oldPrimary);
+    const newMax = maxArity(newPrimary);
+
+    if (newMax < oldMax || newRequired < oldRequired && newMax <= oldMax) {
+      if (newMax < oldMax) return "param_removed";
+    }
+    if (newRequired > oldRequired) return "param_added";
+    if (newMax > oldMax && newRequired === oldRequired) return "param_added";
+    if (oldPrimary.returnType !== newPrimary.returnType) return "return_changed";
+  }
+
+  return classifyChangeKind(
+    oldSym.signature,
+    newSym.signature,
+    newlyDeprecated,
+    signatureChanged,
+  );
+}
+
+function countRequired(sig: FunctionSignatureInfo): number {
+  let n = 0;
+  for (const p of sig.params) {
+    if (p.rest) break;
+    if (!p.optional) n += 1;
+  }
+  return n;
+}
+
+function maxArity(sig: FunctionSignatureInfo): number {
+  if (sig.params.some((p) => p.rest)) return Number.POSITIVE_INFINITY;
+  return sig.params.length;
 }
 
 export function classifyChangeKind(
@@ -333,4 +616,13 @@ function countParams(sig: string): number {
 function returnTypeOf(sig: string): string | null {
   const match = /\):\s*(.+)$/.exec(sig);
   return match?.[1]?.trim() ?? null;
+}
+
+/** Helpers exported for compatibility analysis */
+export function requiredArity(sig: FunctionSignatureInfo): number {
+  return countRequired(sig);
+}
+
+export function maximumArity(sig: FunctionSignatureInfo): number {
+  return maxArity(sig);
 }

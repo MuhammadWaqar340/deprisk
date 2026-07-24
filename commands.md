@@ -24,6 +24,7 @@
 | `--html <file>` | Write an HTML report (`check` only). |
 | `--sarif <file>` | Write SARIF 2.1.0 results (`scan`). |
 | `--verbose` | Extra detail; also lists UP_TO_DATE and SKIPPED. |
+| `--deep` | Detailed call-site compatibility reasoning (also implied by `--verbose`). |
 | `--show-up-to-date` | List packages already on latest. |
 | `--include-skipped` | List untyped packages that were skipped. |
 | `--fail-on high\|medium\|error` | Exit non-zero on risk threshold; `error` also fails on analysis ERROR (not SKIPPED). |

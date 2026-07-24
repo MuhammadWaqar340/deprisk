@@ -19,7 +19,7 @@ import { loadDepRiskConfig } from "./config.js";
 import { isUntypedPackageError } from "./analysisErrors.js";
 import type { RiskReport } from "./types.js";
 
-const VERSION = "0.8.0";
+const VERSION = "0.9.0";
 
 const program = new Command();
 
@@ -80,6 +80,7 @@ program
   .option("--markdown", "print Markdown scan summary (PR-friendly)", false)
   .option("--sarif <file>", "write SARIF 2.1.0 results to a file")
   .option("--verbose", "show flagged details, UP_TO_DATE rows, and all SKIPPED rows", false)
+  .option("--deep", "show detailed call-site compatibility reasoning", false)
   .option("--show-up-to-date", "list UP_TO_DATE packages in the table", false)
   .option("--include-skipped", "list SKIPPED (untyped) packages in the table", false)
   .option("--include-dev", "include devDependency packages (default: true)", true)
@@ -99,6 +100,7 @@ program
     markdown: boolean;
     sarif?: string;
     verbose: boolean;
+    deep: boolean;
     showUpToDate: boolean;
     includeSkipped: boolean;
     includeDev: boolean;
@@ -119,6 +121,7 @@ program
         opts.showUpToDate || opts.verbose || Boolean(fileConfig.showUpToDate);
       const includeSkipped =
         opts.includeSkipped || opts.verbose || Boolean(fileConfig.includeSkipped);
+      const deep = opts.deep || opts.verbose || Boolean(fileConfig.deep);
       // --no-include-dev from CLI always wins; otherwise rc can set includeDev
       const includeDev = opts.includeDev === false
         ? false
@@ -195,6 +198,7 @@ program
           errors: result.errors,
           worstLevel: result.worstLevel,
           verbose: opts.verbose,
+          deep,
           showUpToDate,
           includeSkipped,
         }));
@@ -208,6 +212,7 @@ program
           errors: result.errors,
           worstLevel: result.worstLevel,
           verbose: opts.verbose,
+          deep,
           showUpToDate,
           includeSkipped,
         }));
@@ -246,6 +251,7 @@ program
   )
   .option("--path <projectDir>", "project directory to scan", process.cwd())
   .option("--verbose", "print full old/new signatures for flagged entries", false)
+  .option("--deep", "show detailed call-site compatibility reasoning", false)
   .option("--json", "print raw RiskReport as JSON", false)
   .option("--markdown", "print Markdown report (for PR comments)", false)
   .option("--html <file>", "write an HTML report to a file")
@@ -259,6 +265,7 @@ program
     latest: boolean;
     path: string;
     verbose: boolean;
+    deep: boolean;
     json: boolean;
     markdown: boolean;
     html?: string;
@@ -270,8 +277,10 @@ program
     try {
       const fileConfig = loadDepRiskConfig(opts.path);
       const failOn = normalizeFailOn(opts.failOn) ?? fileConfig.failOn;
+      const deep = opts.deep || opts.verbose || Boolean(fileConfig.deep);
       const report = await runCheck(packageName, {
         ...opts,
+        deep,
         followReexports: opts.followReexports || Boolean(fileConfig.followReexports),
         workspaces: opts.workspaces || Boolean(fileConfig.workspaces),
         semverWeight: opts.semverWeight || Boolean(fileConfig.semverWeight),
@@ -302,6 +311,7 @@ export async function runCheck(
     latest?: boolean;
     path: string;
     verbose?: boolean;
+    deep?: boolean;
     json?: boolean;
     markdown?: boolean;
     html?: string;
@@ -330,12 +340,14 @@ export async function runCheck(
       flagged: [],
       unusedChangeCount: 0,
       notImported: false,
+      compatibility: "NOT_USED",
+      confidence: "HIGH",
     };
 
     if (opts.json) {
       console.log(JSON.stringify({ ...report, upToDate: true }, null, 2));
     } else if (opts.markdown) {
-      console.log(formatMarkdownReport(report));
+      console.log(formatMarkdownReport(report, { deep: opts.deep }));
       console.log(`\n_Already on latest (${toVersion})._`);
     } else {
       console.log(
@@ -378,9 +390,9 @@ export async function runCheck(
   if (opts.json) {
     console.log(JSON.stringify(report, null, 2));
   } else if (opts.markdown) {
-    console.log(formatMarkdownReport(report));
+    console.log(formatMarkdownReport(report, { deep: opts.deep || opts.verbose }));
   } else {
-    printHumanReport(report, Boolean(opts.verbose), opts.path);
+    printHumanReport(report, Boolean(opts.verbose), opts.path, Boolean(opts.deep || opts.verbose));
   }
 
   if (opts.html) {
@@ -394,13 +406,19 @@ export async function runCheck(
   return report;
 }
 
-function printHumanReport(report: RiskReport, verbose: boolean, projectPath: string): void {
+function printHumanReport(report: RiskReport, verbose: boolean, projectPath: string, deep = false): void {
   const levelColor =
     report.level === "HIGH" ? chalk.red
       : report.level === "MEDIUM" ? chalk.yellow
         : chalk.green;
 
   console.log(`${chalk.bold("RISK:")} ${levelColor.bold(report.level)}`);
+  if (report.compatibility) {
+    console.log(`${chalk.bold("COMPATIBILITY:")} ${report.compatibility}`);
+  }
+  if (report.confidence) {
+    console.log(`${chalk.bold("CONFIDENCE:")} ${report.confidence}`);
+  }
   console.log();
 
   if (report.notImported) {
@@ -412,28 +430,49 @@ function printHumanReport(report: RiskReport, verbose: boolean, projectPath: str
   }
 
   if (report.flagged.length === 0) {
-    console.log(chalk.green("No used exports were changed, deprecated, or removed."));
+    if ((report.compatibleChangeCount ?? 0) > 0) {
+      console.log(
+        chalk.green(
+          `API changed, but ${report.compatibleChangeCount} used change(s) remain compatible with your call sites.`,
+        ),
+      );
+    } else {
+      console.log(chalk.green("No used exports were changed, deprecated, or removed."));
+    }
   } else {
     const label =
       report.flagged.length === 1
-        ? "Changed export you use (1):"
-        : `Changed exports you use (${report.flagged.length}):`;
+        ? "Impactful export you use (1):"
+        : `Impactful exports you use (${report.flagged.length}):`;
     console.log(chalk.bold(label));
 
     for (const entry of report.flagged) {
       const mark = chalk.red("✗");
       console.log(`  ${mark} ${chalk.bold(entry.name + "()")}  — ${entry.summary}`);
+      if (entry.compatibility) {
+        console.log(
+          chalk.dim(`      compatibility: ${entry.compatibility} (${entry.confidence ?? "UNKNOWN"})`),
+        );
+      }
       const locations = entry.usages
         .map((u) => `${u.filePath}:${u.line}`)
         .join(", ");
       console.log(chalk.dim(`      used at: ${locations}`));
 
-      if (verbose) {
+      if (verbose || deep) {
         if (entry.oldSignature) {
           console.log(chalk.dim(`      old: ${entry.oldSignature}`));
         }
         if (entry.newSignature) {
           console.log(chalk.dim(`      new: ${entry.newSignature}`));
+        }
+        if (deep && entry.findings) {
+          for (const f of entry.findings.slice(0, 5)) {
+            console.log(chalk.dim(`      • ${f.reason}`));
+            if (f.recommendation) {
+              console.log(chalk.dim(`        → ${f.recommendation}`));
+            }
+          }
         }
       }
     }
@@ -447,12 +486,19 @@ function printHumanReport(report: RiskReport, verbose: boolean, projectPath: str
       ),
     );
   }
+  if ((report.compatibleChangeCount ?? 0) > 0 && report.flagged.length > 0) {
+    console.log(
+      chalk.dim(
+        `Compatible used changes: ${report.compatibleChangeCount} (API changed but your usage still fits).`,
+      ),
+    );
+  }
 
-  if (!verbose && report.flagged.length > 0) {
+  if (!verbose && !deep && report.flagged.length > 0) {
     console.log();
     console.log(
       chalk.dim(
-        `Run \`deprisk check ${report.packageName} --from ${report.fromVersion} --to ${report.toVersion} --verbose\` for full diffs.`,
+        `Run with --deep or --verbose for full signatures and recommendations.`,
       ),
     );
   }

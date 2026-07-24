@@ -2,7 +2,7 @@
 
 Scaffold a [DepRisk](https://www.npmjs.com/package/deprisk-check) GitHub Actions workflow in any project.
 
-Pins **`deprisk-check@0.8.0`** in the generated workflow.
+Pins **`deprisk-check@0.9.0`** in the generated workflow.
 
 ## Usage
 

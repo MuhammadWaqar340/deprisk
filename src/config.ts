@@ -12,6 +12,8 @@ export interface DepRiskConfig {
   includeSkipped?: boolean;
   all?: boolean;
   concurrency?: number;
+  /** Expand deep compatibility details in human/Markdown output */
+  deep?: boolean;
 }
 
 const CONFIG_NAMES = [".depriskrc.json", ".depriskrc"] as const;
@@ -55,6 +57,7 @@ export function validateDepRiskConfig(raw: unknown, source = ".depriskrc"): DepR
     "includeSkipped",
     "all",
     "concurrency",
+    "deep",
   ]);
 
   for (const key of Object.keys(obj)) {
@@ -82,6 +85,7 @@ export function validateDepRiskConfig(raw: unknown, source = ".depriskrc"): DepR
     "showUpToDate",
     "includeSkipped",
     "all",
+    "deep",
   ] as const) {
     if (obj[boolKey] !== undefined) {
       if (typeof obj[boolKey] !== "boolean") {

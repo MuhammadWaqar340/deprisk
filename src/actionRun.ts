@@ -103,5 +103,5 @@ export async function runAction(options: {
 }
 
 export function formatActionReports(reports: RiskReport[]): string {
-  return reports.map(formatMarkdownReport).join("\n\n---\n\n");
+  return reports.map((r) => formatMarkdownReport(r)).join("\n\n---\n\n");
 }
