@@ -1,12 +1,17 @@
 import type {
   ApiDiffEntry,
   ChangeKind,
+  CompatFinding,
+  Compatibility,
+  Confidence,
   FlaggedEntry,
   RiskLevel,
   RiskReport,
   TypesSource,
   UsageMap,
 } from "./types.js";
+import type { CompatibilityAnalysis } from "./compatibility.js";
+import { compatibilityToRiskHint, worstCompatibility, bestConfidence } from "./compatibility.js";
 
 export interface ScoreRiskInput {
   packageName: string;
@@ -17,19 +22,174 @@ export interface ScoreRiskInput {
   typesSource?: { old: TypesSource; new: TypesSource };
   /** When true, a major-version bump with any removal escalates toward HIGH */
   semverWeighting?: boolean;
+  /** Phase 2 deep compatibility analysis (when omitted, falls back to legacy count-based) */
+  compat?: CompatibilityAnalysis;
 }
 
 /**
  * Cross-reference API diff entries with local usages to produce a risk report.
  *
- * HIGH   — any flagged entry is removed, OR 2+ flagged entries are changed
- * MEDIUM — exactly 1 flagged entry with status changed
- * LOW    — no flagged entries (or package not imported)
+ * Phase 2 (with compat):
+ *   HIGH   — any INCOMPATIBLE finding (or used removal)
+ *   MEDIUM — POTENTIALLY_INCOMPATIBLE or UNKNOWN used changes
+ *   LOW    — only COMPATIBLE / NOT_USED
  *
- * With semverWeighting: major bump + any removed used export stays HIGH;
- * major bump + a single param_added-only change stays MEDIUM (not escalated).
+ * Legacy (no compat): count-based HIGH/MEDIUM/LOW for backward-compatible unit tests.
  */
 export function scoreRisk(input: ScoreRiskInput): RiskReport {
+  if (input.compat) {
+    return scoreWithCompat(input, input.compat);
+  }
+  return scoreLegacy(input);
+}
+
+function scoreWithCompat(input: ScoreRiskInput, compat: CompatibilityAnalysis): RiskReport {
+  const { packageName, fromVersion, toVersion, diff, usage, typesSource } = input;
+  const usedNames = new Set(Object.keys(usage));
+  const notImported = usedNames.size === 0;
+
+  const findings = compat.findings;
+  const impactful = new Set(compat.impactfulSymbols);
+  const compatibleSet = new Set(compat.compatibleSymbols);
+
+  const flagged: FlaggedEntry[] = [];
+  let unusedChangeCount = 0;
+  let compatibleChangeCount = 0;
+
+  for (const entry of diff) {
+    if (entry.status !== "removed" && entry.status !== "changed") continue;
+    const usages = usage[entry.name];
+    if (!usages || usages.length === 0) {
+      unusedChangeCount += 1;
+      continue;
+    }
+
+    if (compatibleSet.has(entry.name) && !impactful.has(entry.name)) {
+      compatibleChangeCount += 1;
+      continue;
+    }
+
+    // Only flag when impactful or unknown (not purely compatible)
+    const symbolFindings = findings.filter((f) => f.symbol === entry.name);
+    const worst = worstCompatibility(symbolFindings.map((f) => f.compatibility));
+    if (worst === "COMPATIBLE" || worst === "NOT_USED") {
+      compatibleChangeCount += 1;
+      continue;
+    }
+
+    const changeKind = entry.changeKind ?? inferChangeKind(entry);
+    const primary = pickPrimaryFinding(symbolFindings);
+    flagged.push({
+      name: entry.name,
+      status: entry.status,
+      oldSignature: entry.oldSignature,
+      newSignature: entry.newSignature,
+      deprecated: entry.deprecated,
+      changeKind,
+      usages,
+      summary: primary?.reason ?? summarizeChange(entry, changeKind),
+      compatibility: worst,
+      confidence: primary?.confidence ?? bestConfidence(symbolFindings.map((f) => f.confidence)),
+      findings: symbolFindings,
+    });
+  }
+
+  // Include impactful symbols discovered via secondary analysis (e.g. return-type methods)
+  for (const name of compat.impactfulSymbols) {
+    if (flagged.some((f) => f.name === name)) continue;
+    const symbolFindings = findings.filter((f) => f.symbol === name);
+    if (symbolFindings.length === 0) continue;
+    const worst = worstCompatibility(symbolFindings.map((f) => f.compatibility));
+    if (worst === "COMPATIBLE" || worst === "NOT_USED") continue;
+    const entry = diff.find((d) => d.name === name);
+    const primary = pickPrimaryFinding(symbolFindings);
+    flagged.push({
+      name,
+      status: entry?.status === "removed" ? "removed" : "changed",
+      oldSignature: entry?.oldSignature ?? primary?.oldSignature,
+      newSignature: entry?.newSignature ?? primary?.newSignature,
+      changeKind: entry?.changeKind ?? "signature_changed",
+      usages: usage[name] ?? [],
+      summary: primary?.reason ?? "compatibility impact detected",
+      compatibility: worst,
+      confidence: primary?.confidence ?? bestConfidence(symbolFindings.map((f) => f.confidence)),
+      findings: symbolFindings,
+    });
+  }
+
+  flagged.sort((a, b) => {
+    if (a.status !== b.status) return a.status === "removed" ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  let level = computeLevelFromCompat(compat, flagged);
+  if (input.semverWeighting) {
+    level = applySemverWeighting(level, flagged, fromVersion, toVersion);
+  }
+
+  return {
+    packageName,
+    fromVersion,
+    toVersion,
+    level,
+    flagged,
+    unusedChangeCount,
+    compatibleChangeCount,
+    compatibility: compat.compatibility,
+    confidence: compat.confidence,
+    findings,
+    ...(notImported ? { notImported: true } : {}),
+    ...(typesSource ? { typesSource } : {}),
+  };
+}
+
+function pickPrimaryFinding(findings: CompatFinding[]): CompatFinding | undefined {
+  if (findings.length === 0) return undefined;
+  return [...findings].sort(
+    (a, b) =>
+      rankCompat(b.compatibility) - rankCompat(a.compatibility)
+      || rankConf(b.confidence) - rankConf(a.confidence),
+  )[0];
+}
+
+function rankCompat(c: Compatibility): number {
+  const order: Compatibility[] = [
+    "NOT_USED",
+    "COMPATIBLE",
+    "UNKNOWN",
+    "POTENTIALLY_INCOMPATIBLE",
+    "INCOMPATIBLE",
+  ];
+  return order.indexOf(c);
+}
+
+function rankConf(c: Confidence): number {
+  const order: Confidence[] = ["UNKNOWN", "LOW", "MEDIUM", "HIGH"];
+  return order.indexOf(c);
+}
+
+function computeLevelFromCompat(
+  compat: CompatibilityAnalysis,
+  flagged: FlaggedEntry[],
+): RiskLevel {
+  const hasRemoval = flagged.some((f) => f.status === "removed")
+    || compat.findings.some((f) => f.kind === "REMOVED" || f.kind === "METHOD_REMOVED");
+
+  if (compat.compatibility === "INCOMPATIBLE") {
+    return "HIGH";
+  }
+  if (compat.compatibility === "POTENTIALLY_INCOMPATIBLE") {
+    return "MEDIUM";
+  }
+  if (compat.compatibility === "UNKNOWN") {
+    // Never auto-HIGH on UNKNOWN alone
+    return compatibilityToRiskHint("UNKNOWN", compat.confidence, hasRemoval);
+  }
+  if (flagged.length === 0) return "LOW";
+  return compatibilityToRiskHint(compat.compatibility, compat.confidence, hasRemoval);
+}
+
+function scoreLegacy(input: ScoreRiskInput): RiskReport {
   const { packageName, fromVersion, toVersion, diff, usage, typesSource } = input;
   const usedNames = new Set(Object.keys(usage));
   const notImported = usedNames.size === 0;
@@ -66,7 +226,7 @@ export function scoreRisk(input: ScoreRiskInput): RiskReport {
     return a.name.localeCompare(b.name);
   });
 
-  let level = computeLevel(flagged);
+  let level = computeLevelLegacy(flagged);
 
   if (input.semverWeighting) {
     level = applySemverWeighting(level, flagged, fromVersion, toVersion);
@@ -84,7 +244,7 @@ export function scoreRisk(input: ScoreRiskInput): RiskReport {
   };
 }
 
-function computeLevel(flagged: FlaggedEntry[]): RiskLevel {
+function computeLevelLegacy(flagged: FlaggedEntry[]): RiskLevel {
   if (flagged.length === 0) return "LOW";
 
   const hasRemoved = flagged.some((f) => f.status === "removed");

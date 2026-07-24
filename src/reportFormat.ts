@@ -9,6 +9,8 @@ export interface ScanFormatInput {
   errors: { packageName: string; message: string }[];
   worstLevel: RiskLevel;
   verbose?: boolean;
+  /** Expand full compatibility reasoning (also implied by verbose) */
+  deep?: boolean;
   /** Show every UP_TO_DATE row (default: summarize count only) */
   showUpToDate?: boolean;
   /** Show every SKIPPED row in the main table (default: count + short list when verbose/includeSkipped) */
@@ -161,14 +163,32 @@ export function formatScanSummary(input: ScanFormatInput): string {
   }
 
   const flagged = reports.filter((r) => r.flagged.length > 0);
+  const deep = Boolean(input.deep || verbose);
   if (flagged.length > 0 || verbose) {
     lines.push("");
     lines.push("Flagged:");
     for (const r of flagged) {
+      if (r.compatibility) {
+        lines.push(
+          `  ${r.packageName} — risk ${r.level}, compatibility ${r.compatibility}`
+            + (r.confidence ? `, confidence ${r.confidence}` : ""),
+        );
+      }
       for (const entry of r.flagged) {
         const locs = entry.usages.map((u) => `${u.filePath}:${u.line}`).join(", ");
         lines.push(`  ${r.packageName} — ${entry.name}(): ${entry.summary}`);
         lines.push(`      used at: ${locs}`);
+        if (deep && entry.oldSignature) {
+          lines.push(`      old: ${entry.oldSignature}`);
+        }
+        if (deep && entry.newSignature) {
+          lines.push(`      new: ${entry.newSignature}`);
+        }
+        if (deep && entry.findings?.length) {
+          for (const f of entry.findings.slice(0, 3)) {
+            lines.push(`      [${f.compatibility}/${f.confidence}] ${f.reason}`);
+          }
+        }
       }
     }
     if (flagged.length === 0 && verbose) {
@@ -314,11 +334,24 @@ function riskRank(level: RiskLevel): number {
 
 function appendFlaggedMarkdown(lines: string[], r: RiskReport): void {
   lines.push(`#### \`${r.packageName}\` (\`${r.fromVersion}\` → \`${r.toVersion}\`)`, "");
-  lines.push("Used API changes:", "");
+  lines.push(`**Risk:** \`${r.level}\``);
+  if (r.compatibility) {
+    lines.push(`**Compatibility:** \`${r.compatibility}\``);
+  }
+  if (r.confidence) {
+    lines.push(`**Confidence:** \`${r.confidence}\``);
+  }
+  lines.push("", "Used API changes:", "");
   for (const entry of r.flagged) {
     const locs = entry.usages.map((u) => `\`${u.filePath}:${u.line}\``).join(", ");
     lines.push(`- \`${entry.name}()\`: ${entry.summary}`);
     lines.push(`  - Affected usage: ${locs}`);
+    if (entry.compatibility) {
+      lines.push(`  - Compatibility: \`${entry.compatibility}\` (${entry.confidence ?? "UNKNOWN"})`);
+    }
+    if (entry.findings?.[0]?.recommendation) {
+      lines.push(`  - Recommendation: ${entry.findings[0].recommendation}`);
+    }
   }
   lines.push("");
 }
@@ -330,15 +363,23 @@ function pad(s: string, width: number): string {
 /**
  * Format a RiskReport as a Markdown PR comment.
  */
-export function formatMarkdownReport(report: RiskReport): string {
+export function formatMarkdownReport(report: RiskReport, options: { deep?: boolean } = {}): string {
+  const deep = Boolean(options.deep);
   const lines: string[] = [
     `## DepRisk Upgrade Analysis`,
     "",
     `**${report.packageName}** \`${report.fromVersion}\` → \`${report.toVersion}\``,
     "",
     `**Risk:** \`${report.level}\``,
-    "",
   ];
+
+  if (report.compatibility) {
+    lines.push(`**Compatibility:** \`${report.compatibility}\``);
+  }
+  if (report.confidence) {
+    lines.push(`**Confidence:** \`${report.confidence}\``);
+  }
+  lines.push("");
 
   if (report.typesSource) {
     lines.push(
@@ -353,7 +394,13 @@ export function formatMarkdownReport(report: RiskReport): string {
   }
 
   if (report.flagged.length === 0) {
-    lines.push("No used exports were changed, deprecated, or removed.");
+    if ((report.compatibleChangeCount ?? 0) > 0) {
+      lines.push(
+        `API surface changed, but **${report.compatibleChangeCount}** used change(s) remain compatible with your call sites.`,
+      );
+    } else {
+      lines.push("No used exports were changed, deprecated, or removed.");
+    }
     lines.push("");
     lines.push("_Recommendation: safe to review and merge from an API-usage perspective._");
   } else {
@@ -362,6 +409,14 @@ export function formatMarkdownReport(report: RiskReport): string {
       const locs = entry.usages.map((u) => `\`${u.filePath}:${u.line}\``).join(", ");
       lines.push(`- **${entry.name}** — ${entry.summary}`);
       lines.push(`  - used at: ${locs}`);
+      if (entry.compatibility) {
+        lines.push(`  - compatibility: \`${entry.compatibility}\` (confidence: \`${entry.confidence ?? "UNKNOWN"}\`)`);
+      }
+      if (deep && entry.oldSignature) lines.push(`  - old: \`${entry.oldSignature}\``);
+      if (deep && entry.newSignature) lines.push(`  - new: \`${entry.newSignature}\``);
+      if (deep && entry.findings?.[0]?.recommendation) {
+        lines.push(`  - recommendation: ${entry.findings[0].recommendation}`);
+      }
     }
     lines.push("");
     lines.push("_Recommendation: review before merging._");
@@ -371,6 +426,12 @@ export function formatMarkdownReport(report: RiskReport): string {
     lines.push("");
     lines.push(
       `_Unused API changes (not imported): ${report.unusedChangeCount}._`,
+    );
+  }
+  if ((report.compatibleChangeCount ?? 0) > 0 && report.flagged.length > 0) {
+    lines.push("");
+    lines.push(
+      `_Compatible used changes (not flagged as risk): ${report.compatibleChangeCount}._`,
     );
   }
 
@@ -389,9 +450,18 @@ export function formatHtmlReport(report: RiskReport): string {
   const flagged = report.flagged
     .map((e) => {
       const locs = e.usages.map((u) => `${u.filePath}:${u.line}`).join(", ");
-      return `<li><strong>${escapeHtml(e.name)}</strong> — ${escapeHtml(e.summary)}<br/><small>${escapeHtml(locs)}</small></li>`;
+      const compat = e.compatibility
+        ? ` <em>${escapeHtml(e.compatibility)}</em>`
+        : "";
+      return `<li><strong>${escapeHtml(e.name)}</strong>${compat} — ${escapeHtml(e.summary)}<br/><small>${escapeHtml(locs)}</small></li>`;
     })
     .join("\n");
+
+  const compatLine = report.compatibility
+    ? `<p>Compatibility: <strong>${escapeHtml(report.compatibility)}</strong>`
+      + (report.confidence ? ` · Confidence: <strong>${escapeHtml(report.confidence)}</strong>` : "")
+      + `</p>`
+    : "";
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -406,10 +476,15 @@ export function formatHtmlReport(report: RiskReport): string {
 </head>
 <body>
   <h1>RISK: ${escapeHtml(report.level)}</h1>
+  ${compatLine}
   <p><strong>${escapeHtml(report.packageName)}</strong>
      ${escapeHtml(report.fromVersion)} → ${escapeHtml(report.toVersion)}</p>
-  ${report.flagged.length ? `<ul>${flagged}</ul>` : "<p>No used exports were changed.</p>"}
-  <p><small>Unused changes: ${report.unusedChangeCount}</small></p>
+  ${report.flagged.length ? `<ul>${flagged}</ul>` : "<p>No impactful used-API findings.</p>"}
+  <p><small>Unused changes: ${report.unusedChangeCount}${
+    (report.compatibleChangeCount ?? 0) > 0
+      ? ` · Compatible used changes: ${report.compatibleChangeCount}`
+      : ""
+  }</small></p>
 </body>
 </html>`;
 }

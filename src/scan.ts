@@ -2,7 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fetchPackageVersions } from "./fetcher.js";
-import { diffApiSurfaces } from "./apiDiff.js";
+import { diffExtractedSurfaces, extractApiSurface } from "./apiDiff.js";
+import { analyzeCompatibility } from "./compatibility.js";
 import { scanPackageUsage, discoverWorkspaceRoots } from "./usageScanner.js";
 import { scoreRisk } from "./riskScorer.js";
 import {
@@ -102,8 +103,17 @@ export async function analyzePackage(
     delete usage[name];
   }
 
-  let diff = diffApiSurfaces(fetched.oldTypesEntry, fetched.newTypesEntry);
+  const oldSymbols = extractApiSurface(fetched.oldTypesEntry);
+  const newSymbols = extractApiSurface(fetched.newTypesEntry);
+  let diff = diffExtractedSurfaces(oldSymbols, newSymbols);
   diff = filterIgnoredNames(diff, ignore);
+
+  const compat = analyzeCompatibility({
+    diff,
+    usage,
+    oldSymbols,
+    newSymbols,
+  });
 
   return scoreRisk({
     packageName,
@@ -113,6 +123,7 @@ export async function analyzePackage(
     usage,
     typesSource: fetched.typesSource,
     semverWeighting: opts.semverWeight,
+    compat,
   });
 }
 

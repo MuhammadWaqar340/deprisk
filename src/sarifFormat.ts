@@ -117,6 +117,9 @@ export function formatScanSarif(
             riskLevel: report.level,
             exportName: entry.name,
             changeKind: entry.changeKind ?? entry.status,
+            ...(entry.compatibility ? { compatibility: entry.compatibility } : {}),
+            ...(entry.confidence ? { confidence: entry.confidence } : {}),
+            ...(report.compatibility ? { reportCompatibility: report.compatibility } : {}),
           },
         });
         continue;
@@ -146,6 +149,9 @@ export function formatScanSarif(
             riskLevel: report.level,
             exportName: entry.name,
             changeKind: entry.changeKind ?? entry.status,
+            ...(entry.compatibility ? { compatibility: entry.compatibility } : {}),
+            ...(entry.confidence ? { confidence: entry.confidence } : {}),
+            ...(report.compatibility ? { reportCompatibility: report.compatibility } : {}),
           },
         });
       }
@@ -160,7 +166,7 @@ export function formatScanSarif(
         tool: {
           driver: {
             name: "deprisk-check",
-            version: options.toolVersion ?? "0.8.0",
+            version: options.toolVersion ?? "0.9.0",
             informationUri: "https://www.npmjs.com/package/deprisk-check",
             rules: RULES,
           },

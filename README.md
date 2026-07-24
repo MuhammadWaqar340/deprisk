@@ -3,16 +3,29 @@
 DepRisk analyzes dependency upgrades against your actual TypeScript/JavaScript usage.
 
 It does **not** simply ask: “Did the package change?”  
-It asks: “Did something my code actually uses change?”
+It asks: “Did something my code actually uses change — and is that usage still compatible?”
 
 ```text
-axios  0.21.4 → 1.18.1
-Package API changes: many
-Used API changes: 0
-Risk: LOW
+API changed
+        ↓
+DepRisk checks actual usage + call sites
+        ↓
+Usage remains compatible
+        ↓
+LOW risk
 ```
 
-A major bump can be LOW if you don’t use the breaking APIs. A small bump can be MEDIUM/HIGH if you do.
+```text
+API changed
+        ↓
+DepRisk checks actual usage + call sites
+        ↓
+Usage is incompatible (e.g. extra argument no longer accepted)
+        ↓
+HIGH risk
+```
+
+A major bump can be LOW if you don’t use the breaking APIs **or** your call sites still fit the new signatures. A small bump can be HIGH if your specific usage breaks.
 
 ## Install
 
@@ -64,6 +77,7 @@ If both lockfiles exist, DepRisk prefers **pnpm** and prints a warning.
 | `--sarif <file>` | Write SARIF 2.1.0 results |
 | `--show-up-to-date` | List UP_TO_DATE packages (hidden by default) |
 | `--include-skipped` | List SKIPPED untyped packages in the table |
+| `--deep` | Detailed call-site compatibility reasoning (`--verbose` also expands this) |
 | `--fail-on high\|medium\|error` | Gate on worst risk / errors |
 
 Default output shows a **Summary** (counts for HIGH/MEDIUM/LOW/SKIPPED/ERROR/UP_TO_DATE) plus analyzed packages. Packages already on latest are counted, not listed, unless `--show-up-to-date` / `--verbose`.
@@ -72,10 +86,28 @@ Default output shows a **Summary** (counts for HIGH/MEDIUM/LOW/SKIPPED/ERROR/UP_
 
 | Status | Meaning |
 |--------|---------|
-| **HIGH / MEDIUM / LOW** | Usage-aware API risk for analyzed packages |
+| **HIGH / MEDIUM / LOW** | Usage-aware risk from **compatibility evidence** (not raw change counts) |
 | **UP_TO_DATE** | Locked version === npm latest (not re-analyzed) |
 | **SKIPPED** | No bundled `.d.ts` and no usable `@types/*` — cannot API-diff; **not** a CI failure by default |
 | **ERROR** | Network/fetch/parser failure or unexpected analysis error |
+
+### Compatibility (Phase 2)
+
+DepRisk separates **API change detection** from **usage compatibility**:
+
+| Compatibility | Meaning | Typical risk |
+|---------------|---------|--------------|
+| `COMPATIBLE` | Change exists, but your call sites still fit | LOW |
+| `INCOMPATIBLE` | Proven break at a call site (arity, removed prop/method, …) | HIGH |
+| `POTENTIALLY_INCOMPATIBLE` | Likely issue (e.g. return became nullable without a null check) | MEDIUM |
+| `UNKNOWN` | Cannot prove either way | never auto-HIGH |
+| `NOT_USED` | No used changed exports | LOW |
+
+**Confidence:** `HIGH` / `MEDIUM` / `LOW` / `UNKNOWN` — how deterministic the finding is.
+
+Deep analysis runs by default. Use `--deep` or `--verbose` for full signatures and recommendations.
+
+**Limits:** Phase 2 is static TypeScript/JavaScript usage analysis. It does **not** prove runtime behavior, performance, network, or semantic equivalence.
 
 ### Single package vs latest (`deprisk check <pkg> --latest`)
 
@@ -255,6 +287,29 @@ See [benchmarks/CORPUS.md](./benchmarks/CORPUS.md).
 - `--latest` supports npm + pnpm  
 - Yarn `--latest` scan is not fully supported yet  
 
+## Migrating from 0.8.x to 0.9.0
+
+### Risk model (call-site compatibility)
+
+Risk is no longer “2+ used changed exports = HIGH”.
+
+DepRisk now analyzes **how** you call changed APIs (arity, options keys, overloads, return nullability, property/method use). Compatible call sites stay **LOW** even when the API signature changed.
+
+CI jobs using `--fail-on` may see **fewer** false HIGH/MEDIUM results. Review any workflow that assumed the old count-based model.
+
+### New report fields (additive JSON)
+
+- `compatibility`, `confidence`, `findings[]`
+- `compatibleChangeCount`
+- Enriched `flagged[].compatibility` / `confidence` / `findings`
+
+### New flag
+
+```bash
+deprisk check <pkg> --from A --to B --deep
+deprisk scan --latest --deep
+```
+
 ## Migrating from 0.7.x to 0.8.0
 
 ### UP_TO_DATE output
@@ -298,6 +353,13 @@ Additive fields only: `skipped`, `lockfileKind`. Existing `reports`, `worstLevel
 - pnpm parsing covers common `packages:` key styles (lockfileVersion 5.x–10.x); exotic layouts may need follow-up
 - Runtime-only behavior changes with identical TypeScript signatures can still be missed
 - SARIF is validated structurally for DepRisk’s emitted shape; upload to GitHub Code Scanning should be verified in your CI
+
+## 0.9.0
+
+- **Phase 2:** call-site compatibility analysis (arity, options, overloads, return nullability, properties/methods)
+- Compatibility + confidence separate from risk; UNKNOWN never auto-HIGH
+- `--deep` for detailed reasoning; analysis always on
+- Evidence-based risk scoring (fewer false positives on compatible usage)
 
 ## 0.8.0
 

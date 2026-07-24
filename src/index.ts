@@ -1,7 +1,8 @@
 import type { RiskReport } from "./types.js";
 
 export { fetchPackageVersions, toDefinitelyTypedName, resolveTypesEntry } from "./fetcher.js";
-export { diffApiSurfaces, extractApiSurface, classifyChangeKind } from "./apiDiff.js";
+export { analyzeCompatibility, worstCompatibility } from "./compatibility.js";
+export { diffApiSurfaces, diffExtractedSurfaces, extractApiSurface, classifyChangeKind } from "./apiDiff.js";
 export { scanPackageUsage, discoverWorkspaceRoots } from "./usageScanner.js";
 export { scoreRisk, isMajorBump } from "./riskScorer.js";
 export {
@@ -42,3 +43,11 @@ export { UntypedPackageError, isUntypedPackageError } from "./analysisErrors.js"
 export type { FailOn } from "./exitCode.js";
 export type { DepRiskConfig } from "./config.js";
 export type { RiskReport };
+export type {
+  Compatibility,
+  Confidence,
+  CompatFinding,
+  CompatFindingKind,
+  UsageLocation,
+  UsageKind,
+} from "./types.js";
